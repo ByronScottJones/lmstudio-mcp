@@ -2,7 +2,7 @@
 
 ## Scope and threat model
 
-`lmstudio-mcp` runs as a local MCP server with no network exposure by
+`lmstudio-rs-mcp` runs as a local MCP server with no network exposure by
 itself (it talks stdio to its MCP client and HTTP to a local — or
 explicitly configured remote — LM Studio instance). The main things worth
 knowing:

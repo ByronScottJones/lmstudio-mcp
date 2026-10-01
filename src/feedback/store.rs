@@ -1,6 +1,6 @@
 //! Local-first storage for feedback entries, before a separate `submit`
 //! step hands a specific one off to GitHub. One JSON file
-//! (`~/.lmstudio-mcp/feedback.json`), read-modify-written on every call —
+//! (`~/.lmstudio-rs-mcp/feedback.json`), read-modify-written on every call —
 //! this isn't a hot path, so there's no in-memory cache to keep coherent,
 //! just a mutex guarding against two calls racing on the file.
 //!
@@ -76,11 +76,11 @@ pub struct FeedbackStore {
 }
 
 impl FeedbackStore {
-    /// `~/.lmstudio-mcp/feedback.json`, created lazily on first write.
+    /// `~/.lmstudio-rs-mcp/feedback.json`, created lazily on first write.
     pub fn new() -> Result<Self, FeedbackStoreError> {
         let home = dirs::home_dir().ok_or(FeedbackStoreError::NoHomeDir)?;
         Ok(Self {
-            path: home.join(".lmstudio-mcp").join("feedback.json"),
+            path: home.join(".lmstudio-rs-mcp").join("feedback.json"),
             lock: Mutex::new(()),
         })
     }
@@ -255,7 +255,7 @@ mod tests {
     use super::*;
 
     fn temp_store() -> FeedbackStore {
-        let dir = std::env::temp_dir().join(format!("lmstudio-mcp-test-{}", uuid_like()));
+        let dir = std::env::temp_dir().join(format!("lmstudio-rs-mcp-test-{}", uuid_like()));
         FeedbackStore {
             path: dir.join("feedback.json"),
             lock: Mutex::new(()),

@@ -1,4 +1,4 @@
-//! lmstudio-mcp: an MCP server bridging Claude (and other MCP clients) to
+//! lmstudio-rs-mcp: an MCP server bridging Claude (and other MCP clients) to
 //! LM Studio, Ollama, OpenAI, or Anthropic — selected via `LLM_PROVIDER`.
 //! Cross-platform (macOS, Windows, Linux).
 
@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         provider = %config.provider,
         base_url = %config.base_url,
-        "Starting lmstudio-mcp"
+        "Starting lmstudio-rs-mcp"
     );
 
     let client = ApiClient::new(&config);

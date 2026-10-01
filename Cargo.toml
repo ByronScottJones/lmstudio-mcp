@@ -1,14 +1,14 @@
 [package]
-name = "lmstudio-mcp"
+name = "lmstudio-rs-mcp"
 version = "0.1.0"
 edition = "2021"
-description = "MCP server bridging Claude (and other MCP clients) to a local LM Studio instance — inference and model management, cross-platform (macOS, Windows, Linux)."
+description = "MCP server bridging Claude (and other MCP clients) to LM Studio, Ollama, OpenAI, or Anthropic — inference and, where supported, model management, cross-platform (macOS, Windows, Linux)."
 license = "MIT"
-repository = "https://github.com/ByronScottJones/lmstudio-mcp"
+repository = "https://github.com/ByronScottJones/lmstudio-rs-mcp"
 readme = "README.md"
 
 [[bin]]
-name = "lmstudio-mcp"
+name = "lmstudio-rs-mcp"
 path = "src/main.rs"
 
 [dependencies]
@@ -32,7 +32,7 @@ schemars = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Cross-platform home directory resolution (for ~/.lmstudio-mcp/feedback.json)
+# Cross-platform home directory resolution (for ~/.lmstudio-rs-mcp/feedback.json)
 dirs = "6"
 
 # Misc

@@ -1,4 +1,4 @@
-# lmstudio-mcp
+# lmstudio-rs-mcp
 
 A single-binary [MCP](https://modelcontextprotocol.io) server that bridges Claude
 (or any MCP client) to an LLM backend of your choice — [LM Studio](https://lmstudio.ai/)
@@ -147,7 +147,7 @@ issue — the same local-first, human-reviewed process as
 [`uictl-mac-mcp`](../uictl-mac-mcp)'s `feedback` verb:
 
 1. `feedback_create` drafts an entry (`issue` / `error` / `recommendation`,
-   title, body) to `~/.lmstudio-mcp/feedback.json`. Nothing leaves this
+   title, body) to `~/.lmstudio-rs-mcp/feedback.json`. Nothing leaves this
    machine yet; list/get/update/delete it like any local record.
 2. `feedback_submit` checks the title against this repo's existing GitHub
    issues first (`feedback_check_duplicates` runs this same check without
@@ -229,12 +229,12 @@ Anthropic:
 ## Building
 
 ```bash
-git clone <this-repo-url>
-cd lmstudio-mcp
+git clone https://github.com/ByronScottJones/lmstudio-rs-mcp.git
+cd lmstudio-rs-mcp
 cargo build --release
 ```
 
-The binary is produced at `target/release/lmstudio-mcp` (`.exe` on Windows).
+The binary is produced at `target/release/lmstudio-rs-mcp` (`.exe` on Windows).
 Pre-built binaries for macOS (arm64/x86_64), Windows, and Linux are also
 published as CI artifacts on every push — see
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
@@ -244,7 +244,7 @@ published as CI artifacts on every push — see
 ### Claude Code
 
 ```bash
-claude mcp add lmstudio -- /path/to/lmstudio-mcp
+claude mcp add lmstudio -- /path/to/lmstudio-rs-mcp
 ```
 
 Or add directly to `.mcp.json` / `claude_desktop_config.json`:
@@ -253,7 +253,7 @@ Or add directly to `.mcp.json` / `claude_desktop_config.json`:
 {
   "mcpServers": {
     "lmstudio": {
-      "command": "/path/to/lmstudio-mcp",
+      "command": "/path/to/lmstudio-rs-mcp",
       "env": {
         "LMSTUDIO_HOST": "127.0.0.1",
         "LMSTUDIO_PORT": "1234"
@@ -269,7 +269,7 @@ On Windows, point `command` at the `.exe`:
 {
   "mcpServers": {
     "lmstudio": {
-      "command": "C:\\path\\to\\lmstudio-mcp.exe"
+      "command": "C:\\path\\to\\lmstudio-rs-mcp.exe"
     }
   }
 }
@@ -281,7 +281,7 @@ On Windows, point `command` at the `.exe`:
 {
   "mcpServers": {
     "lmstudio": {
-      "command": "/path/to/lmstudio-mcp",
+      "command": "/path/to/lmstudio-rs-mcp",
       "env": {
         "LLM_BASE_URL": "http://192.168.1.100:1234"
       }
