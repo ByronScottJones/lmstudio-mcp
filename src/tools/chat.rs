@@ -1,7 +1,7 @@
 //! Inference tools over the OpenAI-compatible endpoints: chat_completion,
 //! text_completion.
 
-use crate::client::LmStudioClient;
+use crate::client::ApiClient;
 use crate::types::{ErrorCode, ToolResult};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -24,6 +24,11 @@ pub struct ChatCompletionInput {
     /// Maximum number of tokens to generate. Defaults to 2048.
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// Which model to use. Auto-detected if exactly one model is currently
+    /// loaded (LM Studio/Ollama); required for providers with no
+    /// loaded-model concept (OpenAI/Anthropic).
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -39,9 +44,19 @@ pub struct ChatCompletionData {
 }
 
 pub async fn chat_completion(
-    client: &LmStudioClient,
+    client: &ApiClient,
     input: ChatCompletionInput,
 ) -> ToolResult<ChatCompletionData> {
+    let model = match input.model {
+        Some(m) => m,
+        None => match super::models::auto_detect_model(client).await {
+            Ok(m) => m,
+            Err(e) => {
+                return ToolResult::err(e.to_string(), e.code(), "model auto-detection failed")
+            }
+        },
+    };
+
     let mut messages = Vec::new();
     if let Some(sys) = &input.system_prompt {
         if !sys.is_empty() {
@@ -51,6 +66,7 @@ pub async fn chat_completion(
     messages.push(serde_json::json!({ "role": "user", "content": input.prompt }));
 
     let body = serde_json::json!({
+        "model": model,
         "messages": messages,
         "temperature": input.temperature.unwrap_or(0.7),
         "max_tokens": input.max_tokens.unwrap_or(2048),
@@ -73,7 +89,7 @@ fn extract_chat_result(resp: Value) -> ToolResult<ChatCompletionData> {
         .and_then(|a| a.first());
     let Some(choice) = choice else {
         return ToolResult::err(
-            "LM Studio returned no completion choices",
+            "the provider returned no completion choices",
             ErrorCode::Unknown,
             resp.to_string(),
         );
@@ -116,7 +132,7 @@ fn extract_chat_result(resp: Value) -> ToolResult<ChatCompletionData> {
             )
         } else {
             ToolResult::err(
-                "LM Studio returned an empty response",
+                "the provider returned an empty response",
                 ErrorCode::Unknown,
                 resp.to_string(),
             )
@@ -151,6 +167,11 @@ pub struct TextCompletionInput {
     /// Sequences where generation should stop.
     #[serde(default)]
     pub stop_sequences: Option<Vec<String>>,
+    /// Which model to use. Auto-detected if exactly one model is currently
+    /// loaded (LM Studio/Ollama); required for providers with no
+    /// loaded-model concept (OpenAI).
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -161,10 +182,29 @@ pub struct TextCompletionData {
 }
 
 pub async fn text_completion(
-    client: &LmStudioClient,
+    client: &ApiClient,
     input: TextCompletionInput,
 ) -> ToolResult<TextCompletionData> {
+    if !client.provider().supports_text_completion() {
+        return ToolResult::err(
+            format!("{} has no /v1/completions endpoint", client.provider()),
+            ErrorCode::InvalidInput,
+            "this provider does not support text_completion — use chat_completion instead",
+        );
+    }
+
+    let model = match input.model {
+        Some(m) => m,
+        None => match super::models::auto_detect_model(client).await {
+            Ok(m) => m,
+            Err(e) => {
+                return ToolResult::err(e.to_string(), e.code(), "model auto-detection failed")
+            }
+        },
+    };
+
     let mut body = Map::new();
+    body.insert("model".into(), Value::String(model));
     body.insert("prompt".into(), Value::String(input.prompt));
     body.insert(
         "temperature".into(),
@@ -197,7 +237,7 @@ fn extract_text_result(resp: Value) -> ToolResult<TextCompletionData> {
         .and_then(|a| a.first());
     let Some(choice) = choice else {
         return ToolResult::err(
-            "LM Studio returned no completion choices",
+            "the provider returned no completion choices",
             ErrorCode::Unknown,
             resp.to_string(),
         );
@@ -209,7 +249,7 @@ fn extract_text_result(resp: Value) -> ToolResult<TextCompletionData> {
         .to_string();
     if text.is_empty() {
         return ToolResult::err(
-            "LM Studio returned an empty completion",
+            "the provider returned an empty completion",
             ErrorCode::Unknown,
             resp.to_string(),
         );

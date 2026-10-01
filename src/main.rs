@@ -1,16 +1,18 @@
-//! lmstudio-mcp: an MCP server bridging Claude (and other MCP clients) to a
-//! local LM Studio instance. Cross-platform (macOS, Windows, Linux).
+//! lmstudio-mcp: an MCP server bridging Claude (and other MCP clients) to
+//! LM Studio, Ollama, OpenAI, or Anthropic — selected via `LLM_PROVIDER`.
+//! Cross-platform (macOS, Windows, Linux).
 
 mod client;
 mod config;
 mod feedback;
+mod providers;
 mod server;
 mod sse;
 mod subagent;
 mod tools;
 mod types;
 
-use client::LmStudioClient;
+use client::ApiClient;
 use rmcp::transport::stdio;
 use rmcp::ServiceExt;
 use server::LmStudioServer;
@@ -27,14 +29,17 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let config = config::Config::from_env();
+    let config = config::Config::from_env().map_err(|e| {
+        tracing::error!("{e}");
+        anyhow::anyhow!(e)
+    })?;
     tracing::info!(
-        native_base_url = %config.native_base_url,
-        openai_base_url = %config.openai_base_url,
+        provider = %config.provider,
+        base_url = %config.base_url,
         "Starting lmstudio-mcp"
     );
 
-    let client = LmStudioClient::new(&config);
+    let client = ApiClient::new(&config);
     let feedback_store = feedback::store::FeedbackStore::new()?;
     let server = LmStudioServer::new(client, feedback_store);
 

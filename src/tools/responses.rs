@@ -12,7 +12,7 @@
 //! Responses API.
 
 use super::models::auto_detect_model;
-use crate::client::LmStudioClient;
+use crate::client::ApiClient;
 use crate::types::{ErrorCode, ToolResult};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -197,16 +197,26 @@ fn failure_detail(data: &Value, status: Option<&str>) -> Option<String> {
     Some(
         data.get("error")
             .and_then(|e| e.get("message").and_then(|m| m.as_str()).or(e.as_str()))
-            .unwrap_or("LM Studio reported this response as failed, with no further detail")
+            .unwrap_or("the provider reported this response as failed, with no further detail")
             .to_string(),
     )
 }
 
 async fn send_responses_request(
-    client: &LmStudioClient,
+    client: &ApiClient,
     mut body: Map<String, Value>,
     model: Option<String>,
 ) -> ToolResult<ResponseData> {
+    if !client.provider().supports_responses_api() {
+        return ToolResult::err(
+            format!(
+                "{} has no /v1/responses endpoint — use chat_completion instead, which works on every provider",
+                client.provider()
+            ),
+            ErrorCode::InvalidInput,
+            "this provider does not support create_response/start_conversation/continue_conversation",
+        );
+    }
     let model = match model {
         Some(m) => m,
         None => match auto_detect_model(client).await {
@@ -220,7 +230,7 @@ async fn send_responses_request(
         },
     };
     body.insert("model".into(), Value::String(model.clone()));
-    // `LmStudioClient::responses` always requests this with "stream": true
+    // `ApiClient::responses` always requests this with "stream": true
     // internally (see its doc comment) and reassembles the result, so
     // nothing needs setting here.
 
@@ -251,7 +261,7 @@ async fn send_responses_request(
             // LM Studio-side failure as a successful empty response.
             if let Some(detail) = failure_detail(&data, status) {
                 return ToolResult::err(
-                    format!("Request to LM Studio failed: {detail}"),
+                    format!("Request failed: {detail}"),
                     ErrorCode::Unknown,
                     detail,
                 );
@@ -277,11 +287,7 @@ async fn send_responses_request(
                 },
             )
         }
-        Err(e) => ToolResult::err(
-            format!("Request to LM Studio failed: {e}"),
-            e.code(),
-            e.to_string(),
-        ),
+        Err(e) => ToolResult::err(format!("Request failed: {e}"), e.code(), e.to_string()),
     }
 }
 
@@ -312,7 +318,7 @@ pub struct CreateResponseInput {
 }
 
 pub async fn create_response(
-    client: &LmStudioClient,
+    client: &ApiClient,
     input: CreateResponseInput,
 ) -> ToolResult<ResponseData> {
     let mut body = Map::new();
@@ -358,7 +364,7 @@ pub struct StartConversationInput {
 }
 
 pub async fn start_conversation(
-    client: &LmStudioClient,
+    client: &ApiClient,
     personas: &PersonaCache,
     input: StartConversationInput,
 ) -> ToolResult<ResponseData> {
@@ -409,7 +415,7 @@ pub struct ContinueConversationInput {
 }
 
 pub async fn continue_conversation(
-    client: &LmStudioClient,
+    client: &ApiClient,
     personas: &PersonaCache,
     input: ContinueConversationInput,
 ) -> ToolResult<ResponseData> {

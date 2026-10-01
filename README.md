@@ -1,11 +1,22 @@
 # lmstudio-mcp
 
 A single-binary [MCP](https://modelcontextprotocol.io) server that bridges Claude
-(or any MCP client) to a local [LM Studio](https://lmstudio.ai/) instance —
-inference **and** model management, in one Rust binary that runs natively on
-macOS, Windows, and Linux.
+(or any MCP client) to an LLM backend of your choice — [LM Studio](https://lmstudio.ai/)
+or [Ollama](https://ollama.com/) running locally, or OpenAI/Anthropic in the
+cloud — inference **and**, where the provider supports it, model management,
+in one Rust binary that runs natively on macOS, Windows, and Linux.
 
-This project merges the functionality of two earlier, separate MCP servers:
+Exactly one provider is active per server instance, selected with
+`LLM_PROVIDER` (defaults to `lmstudio` — see [Configuration](#configuration)).
+Every tool works the same way regardless of which one is configured;
+inference tools (`chat_completion`, `run_subagent`, ...) work identically on
+all four, while model-management tools and the stateful `/v1/responses`
+tools are only meaningful for providers that actually have that concept (see
+the [Tools](#tools) table) and return a clear "not supported by this
+provider" result otherwise rather than erroring confusingly.
+
+This project originally merged the functionality of two earlier, separate
+LM-Studio-only MCP servers:
 
 - **[LMStudio-MCP](../LMStudio-MCP)** (Python) — inference: chat/text
   completions, embeddings, and stateful conversations via LM Studio's
@@ -13,31 +24,41 @@ This project merges the functionality of two earlier, separate MCP servers:
 - **[lm-studio-mcp-server](../lm-studio-mcp-server)** (TypeScript) — model
   management: list, load, unload, and inspect models via LM Studio's SDK.
 
-Both capabilities are reimplemented here over LM Studio's **native REST API**
-(`/api/v1/...`, added in recent LM Studio releases alongside the
-OpenAI-compatible `/v1/...` surface), so there's no WebSocket SDK dependency
-and no Python/Node runtime to install — just one executable.
+Both capabilities were originally implemented over LM Studio's **native REST
+API** (`/api/v1/...`) and OpenAI-compatible `/v1/...` surface — no WebSocket
+SDK dependency and no Python/Node runtime to install, just one executable.
+Ollama/OpenAI/Anthropic support (see below) was added on top of that same
+foundation: Ollama's own native API (`/api/tags`, `/api/ps`, `/api/generate`)
+is translated into the same shape LM Studio's native API returns, and
+Anthropic's `/v1/messages` wire format is translated to/from the
+OpenAI-compatible shape every tool already speaks — so none of the tools
+below need to know which provider is actually active.
 
 ## Tools
 
-| Tool | From | Description |
-|------|------|-------------|
-| `health_check` | both | Verify LM Studio is reachable |
-| `list_models` | TS | List all downloaded models in the local library |
-| `list_loaded_models` | TS | List currently loaded model instances |
-| `get_current_model` | Python | Identify the loaded model (replaces the Python original's hack of asking the model to name itself — this reads it straight from the API) |
-| `get_model_info` | TS | Detailed info for one loaded instance |
-| `load_model` | TS | Load a model into memory |
-| `unload_model` | TS | Unload a model instance |
-| `chat_completion` | Python | Chat-formatted completion |
-| `text_completion` | Python | Raw/non-chat completion (faster, for code/continuation) |
-| `generate_embeddings` | Python | Vector embeddings for RAG/semantic search |
-| `create_response` | Python | Stateful response via `/v1/responses` |
-| `start_conversation` | Python | Begin a multi-turn session with a locked-in system prompt |
-| `continue_conversation` | Python | Continue a session started above |
-| `run_subagent` | new | Delegate a task to a local model acting as a sandboxed subagent |
-| `feedback_create` / `_list` / `_get` / `_update` / `_delete` | new | Draft/manage local feedback entries about this server |
-| `feedback_check_duplicates` / `feedback_submit` | new | Check and submit a feedback entry as a GitHub issue |
+| Tool | Works on | Description |
+|------|----------|-------------|
+| `health_check` | all | Verify the configured provider is reachable |
+| `list_models` | all | List models available from the configured provider — the local library for LM Studio/Ollama, or every model the API key can use for OpenAI/Anthropic |
+| `list_loaded_models` | LM Studio, Ollama | List currently loaded model instances |
+| `get_current_model` | LM Studio, Ollama | Identify the loaded model |
+| `get_model_info` | LM Studio, Ollama | Detailed info for one loaded instance |
+| `load_model` | LM Studio, Ollama | Load a model into memory |
+| `unload_model` | LM Studio, Ollama | Unload a model instance |
+| `chat_completion` | all | Chat-formatted completion |
+| `text_completion` | LM Studio, Ollama, OpenAI | Raw/non-chat completion (faster, for code/continuation) |
+| `generate_embeddings` | all except Anthropic | Vector embeddings for RAG/semantic search |
+| `create_response` | LM Studio, OpenAI | Stateful response via a `/v1/responses`-style endpoint |
+| `start_conversation` | LM Studio, OpenAI | Begin a multi-turn session with a locked-in system prompt |
+| `continue_conversation` | LM Studio, OpenAI | Continue a session started above |
+| `run_subagent` | all | Delegate a task to a model acting as a sandboxed subagent |
+| `feedback_create` / `_list` / `_get` / `_update` / `_delete` | all | Draft/manage local feedback entries about this server |
+| `feedback_check_duplicates` / `feedback_submit` | all | Check and submit a feedback entry as a GitHub issue |
+
+Model-management and `/v1/responses` tools on a provider that doesn't
+support them return a normal `ToolResult` explaining that (success for a
+read like `list_loaded_models`, a clear error for a mutation like
+`load_model`) rather than a confusing raw HTTP error.
 
 Every tool returns the same envelope — `{ success, message, data?, error? }`
 — so a client can handle success and failure uniformly (this convention is
@@ -52,15 +73,17 @@ carried over from the TypeScript project).
 ### Generation is streamed internally
 
 `chat_completion`, `text_completion`, and the `/v1/responses` tools always
-request `"stream": true` from LM Studio internally and reassemble the full
-response here — the MCP tool call itself is still a single request/response,
-this is purely a transport-level choice. The reason: a non-streaming call
-has to be timed out against its *total* duration, and no duration is both
-short enough to catch a genuinely hung connection and long enough for a slow
-reasoning model's legitimate output. Streaming turns that into an *idle*
-timeout instead (reset on every chunk that actually arrives, 60s default) —
-a model generating steadily for minutes is never killed, and a stalled
-connection is still caught quickly. See `src/sse.rs`.
+request server-side streaming internally and reassemble the full response
+here — the MCP tool call itself is still a single request/response, this is
+purely a transport-level choice. The reason: a non-streaming call has to be
+timed out against its *total* duration, and no duration is both short enough
+to catch a genuinely hung connection and long enough for a slow reasoning
+model's legitimate output. Streaming turns that into an *idle* timeout
+instead (reset on every chunk that actually arrives, 60s default) — a model
+generating steadily for minutes is never killed, and a stalled connection is
+still caught quickly. See `src/sse.rs`. This applies identically whether the
+stream is OpenAI-shaped (LM Studio/Ollama/OpenAI) or Anthropic-shaped — both
+are reassembled into the same unified result in `src/client.rs`.
 
 ### Reasoning models
 
@@ -147,9 +170,15 @@ another one.
 
 ## Prerequisites
 
-- [LM Studio](https://lmstudio.ai/) running locally with its local server
-  enabled (LM Studio → Developer tab → Start Server), on a version that
-  exposes the native `/api/v1` REST API.
+Depending on which provider you configure (see [Configuration](#configuration)):
+
+- **LM Studio** (default) — [LM Studio](https://lmstudio.ai/) running
+  locally with its local server enabled (LM Studio → Developer tab → Start
+  Server), on a version that exposes the native `/api/v1` REST API.
+- **Ollama** — [Ollama](https://ollama.com/) running locally (`ollama
+  serve`, or already running as a background service).
+- **OpenAI** / **Anthropic** — an API key with available credit/quota.
+  Nothing else to install; these are plain HTTPS calls to the provider's API.
 - Rust 1.80+ if building from source (see [Building](#building)) — the
   floor is `std::sync::LazyLock` (`src/subagent/guard.rs`), stabilized in
   1.80; CI builds against the latest stable toolchain rather than pinning
@@ -161,11 +190,41 @@ Read from the environment at connect time:
 
 | Variable | Default | Description |
 |----------|---------|--------------|
-| `LMSTUDIO_HOST` | `127.0.0.1` | LM Studio host |
-| `LMSTUDIO_PORT` | `1234` | LM Studio port |
-| `LMSTUDIO_BASE_URL` | _(derived)_ | Full `scheme://host:port` override, e.g. `http://192.168.1.100:5678`. Takes precedence over host/port. |
-| `LMSTUDIO_API_TOKEN` | _(none)_ | Bearer token, if LM Studio's server has API token auth enabled (Developer tab → Server Settings). Sent as `Authorization: Bearer <token>`. |
+| `LLM_PROVIDER` | `lmstudio` | One of `lmstudio`, `ollama`, `openai`, `anthropic` (`claude` also accepted). Unknown values fall back to `lmstudio` with a warning. |
+| `LLM_BASE_URL` | provider default | Full `scheme://host:port` override. Provider defaults: `http://127.0.0.1:1234` (lmstudio), `http://127.0.0.1:11434` (ollama), `https://api.openai.com` (openai), `https://api.anthropic.com` (anthropic). |
+| `LLM_API_KEY` | _(none)_ | API key / bearer token. **Required** for `openai` and `anthropic` (the server refuses to start without one); optional for `lmstudio`/`ollama`, if you've turned on local API auth. |
 | `GITHUB_TOKEN` | _(none)_ | Used by `feedback_check_duplicates`/`feedback_submit` for a private repo, if no `token` argument is passed and `gh` isn't already authenticated. |
+
+Anthropic authenticates with `x-api-key` + a required `anthropic-version`
+header rather than `Authorization: Bearer`; this is handled internally based
+on `LLM_PROVIDER` — `LLM_API_KEY` is still just your plain Anthropic API key.
+
+### Existing LM Studio configs keep working
+
+If you were already using `LMSTUDIO_HOST` / `LMSTUDIO_PORT` /
+`LMSTUDIO_BASE_URL` / `LMSTUDIO_API_TOKEN`, nothing changes — they're still
+read exactly as before whenever `LLM_PROVIDER` is unset or `lmstudio`, and
+take precedence over the new variables' defaults for that provider only.
+There's no need to migrate an existing config; `LLM_PROVIDER`/`LLM_BASE_URL`/
+`LLM_API_KEY` are additive, for selecting a *different* provider or using the
+new generic names going forward.
+
+### Examples
+
+Ollama on the default local port:
+```json
+{ "env": { "LLM_PROVIDER": "ollama" } }
+```
+
+OpenAI:
+```json
+{ "env": { "LLM_PROVIDER": "openai", "LLM_API_KEY": "sk-..." } }
+```
+
+Anthropic:
+```json
+{ "env": { "LLM_PROVIDER": "anthropic", "LLM_API_KEY": "sk-ant-..." } }
+```
 
 ## Building
 
@@ -216,7 +275,7 @@ On Windows, point `command` at the `.exe`:
 }
 ```
 
-### Connecting to LM Studio on another machine
+### Connecting to a backend on another machine
 
 ```json
 {
@@ -224,12 +283,15 @@ On Windows, point `command` at the `.exe`:
     "lmstudio": {
       "command": "/path/to/lmstudio-mcp",
       "env": {
-        "LMSTUDIO_BASE_URL": "http://192.168.1.100:1234"
+        "LLM_BASE_URL": "http://192.168.1.100:1234"
       }
     }
   }
 }
 ```
+
+(`LMSTUDIO_BASE_URL` still works identically for the default `lmstudio`
+provider — see [Configuration](#configuration).)
 
 ## Architecture
 
@@ -237,8 +299,9 @@ On Windows, point `command` at the `.exe`:
 src/
 ├── main.rs        # Entry point: logging, config, stdio transport, shutdown
 ├── server.rs      # Wires each tools::* function to an #[tool]-annotated method
-├── client.rs      # HTTP client over LM Studio's native + OpenAI-compatible APIs
-├── config.rs      # Environment-variable configuration
+├── client.rs      # HTTP client over every provider's API, with Ollama/Anthropic translation
+├── providers.rs   # The Provider enum: capability matrix per backend
+├── config.rs      # Environment-variable configuration (provider, base URL, API key)
 ├── types.rs       # Shared ToolResult<T> envelope, ErrorCode, ClientError
 ├── sse.rs         # Server-Sent Events reader (idle-timeout streaming, see above)
 ├── feedback/
@@ -265,7 +328,7 @@ human-review flow), `tokio` for async I/O, and `reqwest` with `rustls` (no
 OpenSSL dependency, for easy cross-compilation and static-ish binaries on
 all three platforms).
 
-### A note on LM Studio's native REST API
+### A note on native/translated API shapes
 
 LM Studio's `/api/v1` model-management endpoints are newer and less
 exhaustively documented than the stable OpenAI-compatible surface. Response
@@ -274,8 +337,11 @@ reference, but every field is optional with `#[serde(default)]` and the
 top-level model entry keeps a `#[serde(flatten)] extra` catch-all — so a
 field LM Studio adds, renames, or omits in a future version degrades
 gracefully (parses with that field missing/extra) rather than failing to
-parse at all. If you hit a real mismatch against your LM Studio version,
-it's isolated to `src/client.rs`.
+parse at all. Ollama's native API (`/api/tags`, `/api/ps`, `/api/generate`)
+is translated into this same shape, and Anthropic's `/v1/messages`
+request/response/streaming shape is translated to/from the OpenAI-compatible
+one every tool speaks — both translations, and every provider-specific
+quirk they exist to paper over, are isolated to `src/client.rs`.
 
 ## Development
 

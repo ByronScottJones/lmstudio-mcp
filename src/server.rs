@@ -1,7 +1,7 @@
 //! The MCP server: wires each tool implementation in `crate::tools` up to
 //! the `rmcp` tool-call dispatch machinery.
 
-use crate::client::LmStudioClient;
+use crate::client::ApiClient;
 use crate::feedback::store::FeedbackStore;
 use crate::tools::{chat, embeddings, feedback, health_check, models, responses, subagent};
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -15,7 +15,7 @@ const DEFAULT_FEEDBACK_REPO: &str = "ByronScottJones/lmstudio-mcp";
 
 #[derive(Clone)]
 pub struct LmStudioServer {
-    client: Arc<LmStudioClient>,
+    client: Arc<ApiClient>,
     feedback_store: Arc<FeedbackStore>,
     // Separate from `client`'s HTTP client: this one talks to api.github.com,
     // not LM Studio, and carries no LM Studio base URL/auth token.
@@ -31,7 +31,7 @@ pub struct LmStudioServer {
 }
 
 impl LmStudioServer {
-    pub fn new(client: LmStudioClient, feedback_store: FeedbackStore) -> Self {
+    pub fn new(client: ApiClient, feedback_store: FeedbackStore) -> Self {
         Self {
             client: Arc::new(client),
             feedback_store: Arc::new(feedback_store),
@@ -44,17 +44,23 @@ impl LmStudioServer {
 
 #[tool_router]
 impl LmStudioServer {
-    #[tool(description = "Check connectivity to the LM Studio server")]
+    #[tool(
+        description = "Check connectivity to the configured LLM provider (LM Studio, Ollama, OpenAI, or Anthropic — see LLM_PROVIDER)"
+    )]
     async fn health_check(&self) -> Json<crate::types::ToolResult<health_check::HealthCheckData>> {
         Json(health_check::health_check(&self.client).await)
     }
 
-    #[tool(description = "List all downloaded models in LM Studio's local library")]
+    #[tool(
+        description = "List models available from the configured provider — the local library for LM Studio/Ollama, or every model the API key can use for OpenAI/Anthropic"
+    )]
     async fn list_models(&self) -> Json<crate::types::ToolResult<Vec<models::ModelSummary>>> {
         Json(models::list_models(&self.client).await)
     }
 
-    #[tool(description = "List all currently loaded model instances in LM Studio")]
+    #[tool(
+        description = "List all currently loaded model instances. Only meaningful for LM Studio/Ollama — cloud providers have no loading concept and return an empty list"
+    )]
     async fn list_loaded_models(
         &self,
     ) -> Json<crate::types::ToolResult<Vec<models::LoadedModelSummary>>> {
@@ -62,7 +68,7 @@ impl LmStudioServer {
     }
 
     #[tool(
-        description = "Identify the currently loaded model (or models, if more than one is loaded)"
+        description = "Identify the currently loaded model (or models, if more than one is loaded). Only meaningful for LM Studio/Ollama"
     )]
     async fn get_current_model(
         &self,
@@ -70,7 +76,9 @@ impl LmStudioServer {
         Json(models::get_current_model(&self.client).await)
     }
 
-    #[tool(description = "Get detailed information about a specific loaded model instance")]
+    #[tool(
+        description = "Get detailed information about a specific loaded model instance. Only meaningful for LM Studio/Ollama"
+    )]
     async fn get_model_info(
         &self,
         Parameters(input): Parameters<models::GetModelInfoInput>,
@@ -78,7 +86,9 @@ impl LmStudioServer {
         Json(models::get_model_info(&self.client, input).await)
     }
 
-    #[tool(description = "Load a model into memory in LM Studio")]
+    #[tool(
+        description = "Load a model into memory. Only supported by LM Studio/Ollama — cloud providers have nothing to load"
+    )]
     async fn load_model(
         &self,
         Parameters(input): Parameters<models::LoadModelInput>,
@@ -86,7 +96,7 @@ impl LmStudioServer {
         Json(models::load_model(&self.client, input).await)
     }
 
-    #[tool(description = "Unload a model instance from memory in LM Studio")]
+    #[tool(description = "Unload a model instance from memory. Only supported by LM Studio/Ollama")]
     async fn unload_model(
         &self,
         Parameters(input): Parameters<models::UnloadModelInput>,
@@ -94,7 +104,9 @@ impl LmStudioServer {
         Json(models::unload_model(&self.client, input).await)
     }
 
-    #[tool(description = "Generate a chat completion from the current LM Studio model")]
+    #[tool(
+        description = "Generate a chat completion from the configured provider's current/named model"
+    )]
     async fn chat_completion(
         &self,
         Parameters(input): Parameters<chat::ChatCompletionInput>,
@@ -113,7 +125,7 @@ impl LmStudioServer {
     }
 
     #[tool(
-        description = "Generate vector embeddings for text, for semantic search, RAG, and similarity comparisons. Requires an embedding-specific model to be loaded"
+        description = "Generate vector embeddings for text, for semantic search, RAG, and similarity comparisons. Requires an embedding-specific model (or provider — Anthropic has no embeddings endpoint)"
     )]
     async fn generate_embeddings(
         &self,
@@ -123,7 +135,7 @@ impl LmStudioServer {
     }
 
     #[tool(
-        description = "Create a stateful response via LM Studio's /v1/responses endpoint — conversation context is tracked server-side by response ID, no manual message history needed. Requires LM Studio v0.3.29+"
+        description = "Create a stateful response via a /v1/responses-style endpoint — conversation context is tracked server-side by response ID, no manual message history needed. Only LM Studio (v0.3.29+) and OpenAI support this; other providers return an error directing you to chat_completion instead"
     )]
     async fn create_response(
         &self,
@@ -133,7 +145,7 @@ impl LmStudioServer {
     }
 
     #[tool(
-        description = "Start a stateful multi-turn conversation with a persistent system prompt. Returns a response_id to pass to continue_conversation. Requires LM Studio v0.3.29+"
+        description = "Start a stateful multi-turn conversation with a persistent system prompt. Returns a response_id to pass to continue_conversation. Only LM Studio (v0.3.29+) and OpenAI support this"
     )]
     async fn start_conversation(
         &self,
@@ -153,7 +165,7 @@ impl LmStudioServer {
     }
 
     #[tool(
-        description = "Delegate a task to a local LM Studio model acting as a subagent, with its own sandboxed tools (read_file, list_directory, search_files, and — depending on `capability` — write_file, run_command). Comparable to how Claude Code spawns a subagent: it works autonomously across as many tool calls as it needs and you get back a final report, not the full transcript. Good for offloading well-scoped, lower-level work (investigate a directory, make a specific edit, run and interpret a build/test command) from a local model instead of doing it yourself."
+        description = "Delegate a task to a model from the configured provider acting as a subagent, with its own sandboxed tools (read_file, list_directory, search_files, and — depending on `capability` — write_file, run_command). Comparable to how Claude Code spawns a subagent: it works autonomously across as many tool calls as it needs and you get back a final report, not the full transcript. Good for offloading well-scoped, lower-level work (investigate a directory, make a specific edit, run and interpret a build/test command) from a smaller/local model instead of doing it yourself."
     )]
     async fn run_subagent(
         &self,
@@ -245,6 +257,6 @@ impl LmStudioServer {
 #[tool_handler(
     name = "lmstudio-mcp",
     version = "0.1.0",
-    instructions = "Bridge to a local LM Studio instance: inference (chat, text completion, embeddings, stateful conversations), model management (list, load, unload), delegating work to a local model as a sandboxed subagent (run_subagent), and filing feedback about this server itself as GitHub issues (feedback_*). Run health_check first to confirm LM Studio is reachable."
+    instructions = "Bridge to an LLM provider — LM Studio or Ollama (local), or OpenAI/Anthropic (cloud, require an API key) — selected via LLM_PROVIDER: inference (chat, text completion, embeddings, stateful conversations where supported), model management on local providers (list, load, unload), delegating work to a model as a sandboxed subagent (run_subagent), and filing feedback about this server itself as GitHub issues (feedback_*). Run health_check first to confirm the configured provider is reachable."
 )]
 impl ServerHandler for LmStudioServer {}

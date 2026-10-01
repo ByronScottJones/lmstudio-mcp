@@ -10,7 +10,7 @@
 //! brief action log is included since that's cheap and useful context for
 //! judging whether to trust the result.
 
-use crate::client::LmStudioClient;
+use crate::client::ApiClient;
 use crate::subagent::tools::{self, Capability, SubagentContext};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -47,7 +47,7 @@ pub struct SubagentReport {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
-    #[error("LM Studio request failed: {0}")]
+    #[error("request failed: {0}")]
     Client(#[from] crate::types::ClientError),
     #[error("working directory \"{path}\" doesn't exist or isn't accessible: {source}")]
     WorkingDirectory {
@@ -79,7 +79,7 @@ history — these are blocked for you regardless, but don't waste turns attempti
 the working directory you've been given.";
 
 pub async fn run(
-    client: &LmStudioClient,
+    client: &ApiClient,
     config: SubagentConfig,
     working_directory: &Path,
 ) -> Result<SubagentReport, RunnerError> {

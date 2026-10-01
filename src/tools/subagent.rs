@@ -2,7 +2,7 @@
 //! model acting as a subagent, with its own sandboxed tools. See
 //! `src/subagent/` for the agentic loop, tool sandbox, and safety guard.
 
-use crate::client::LmStudioClient;
+use crate::client::ApiClient;
 use crate::subagent::runner::{self, SubagentConfig, SubagentReport};
 use crate::subagent::tools::Capability;
 use crate::types::{ErrorCode, ToolResult};
@@ -26,8 +26,9 @@ pub struct RunSubagentInput {
     /// the highest-risk command patterns). Grant only what the task needs.
     #[serde(default)]
     pub capability: Option<Capability>,
-    /// Which loaded model to use as the subagent. Auto-detected if exactly
-    /// one model is currently loaded in LM Studio.
+    /// Which model to use as the subagent. Auto-detected if exactly one
+    /// model is currently loaded (LM Studio/Ollama); required for providers
+    /// with no loaded-model concept (OpenAI/Anthropic).
     #[serde(default)]
     pub model: Option<String>,
     /// Override the subagent's default system prompt/persona.
@@ -44,7 +45,7 @@ pub struct RunSubagentInput {
 }
 
 pub async fn run_subagent(
-    client: &LmStudioClient,
+    client: &ApiClient,
     input: RunSubagentInput,
 ) -> ToolResult<SubagentReport> {
     let working_directory = PathBuf::from(&input.working_directory);
