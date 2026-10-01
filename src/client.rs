@@ -255,24 +255,28 @@ impl LmStudioClient {
     /// POST a chat-completions request to the OpenAI-compatible endpoint.
     pub async fn chat_completion(&self, body: Value) -> Result<Value, ClientError> {
         let url = format!("{}/chat/completions", self.openai_base_url);
-        self.post_json(&url, &body, DEFAULT_TIMEOUT).await
+        self.post_json(&url, &body, crate::types::INFERENCE_TIMEOUT)
+            .await
     }
 
     /// POST a legacy text-completions request to the OpenAI-compatible endpoint.
     pub async fn text_completion(&self, body: Value) -> Result<Value, ClientError> {
         let url = format!("{}/completions", self.openai_base_url);
-        self.post_json(&url, &body, DEFAULT_TIMEOUT).await
+        self.post_json(&url, &body, crate::types::INFERENCE_TIMEOUT)
+            .await
     }
 
     /// POST an embeddings request to the OpenAI-compatible endpoint.
     pub async fn embeddings(&self, body: Value) -> Result<Value, ClientError> {
         let url = format!("{}/embeddings", self.openai_base_url);
-        self.post_json(&url, &body, DEFAULT_TIMEOUT).await
+        self.post_json(&url, &body, crate::types::INFERENCE_TIMEOUT)
+            .await
     }
 
     /// POST a stateful responses request to the OpenAI-compatible endpoint.
     pub async fn responses(&self, body: Value) -> Result<Value, ClientError> {
         let url = format!("{}/responses", self.openai_base_url);
-        self.post_json(&url, &body, DEFAULT_TIMEOUT).await
+        self.post_json(&url, &body, crate::types::INFERENCE_TIMEOUT)
+            .await
     }
 }

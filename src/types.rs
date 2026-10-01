@@ -116,6 +116,12 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Extended timeout for model loading, which can take a while for large models.
 pub const LOAD_MODEL_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Timeout for text-generation calls (chat/text completions, embeddings,
+/// responses). Local inference — especially a reasoning model "thinking"
+/// at length before it emits a final answer — can easily run well past
+/// `DEFAULT_TIMEOUT`, so these get a much longer budget.
+pub const INFERENCE_TIMEOUT: Duration = Duration::from_secs(180);
+
 /// Wrap a future with a timeout, mapping elapsed time to [`ClientError::Timeout`].
 pub async fn with_timeout<F, T>(fut: F, timeout: Duration) -> Result<T, ClientError>
 where

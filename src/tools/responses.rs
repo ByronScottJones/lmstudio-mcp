@@ -24,6 +24,10 @@ pub struct ResponseData {
     /// (continue_conversation) to continue this conversation.
     pub response_id: String,
     pub message: String,
+    /// The model's internal "thinking" trace, for reasoning models that
+    /// expose one. Populated whenever a `reasoning` output block is present,
+    /// even alongside a non-empty `message`.
+    pub reasoning_content: Option<String>,
     pub model: String,
 }
 
@@ -60,30 +64,63 @@ async fn auto_detect_model(client: &LmStudioClient) -> Result<String, String> {
     }
 }
 
-/// Extract the assistant's text from a `/v1/responses` payload: walk
-/// `output[]` for a `message` block, then its `content[]` for an
-/// `output_text` item.
-fn extract_output_text(data: &Value) -> String {
-    if let Some(output) = data.get("output") {
-        if let Some(arr) = output.as_array() {
+/// The assistant's final text and, separately, any reasoning trace, pulled
+/// out of a `/v1/responses` payload's `output[]` array.
+struct ExtractedOutput {
+    message: String,
+    reasoning_content: Option<String>,
+}
+
+/// Walk `output[]` for a `message` block (then its `content[]` for an
+/// `output_text` item) and, separately, for a `reasoning` block. A model
+/// that runs out of `max_output_tokens` while thinking can legitimately
+/// produce the latter without the former — reasoning models (e.g. Qwen3 in
+/// thinking mode) expose their deliberation this way.
+fn extract_output(data: &Value) -> ExtractedOutput {
+    let mut message = String::new();
+    let mut reasoning_parts = Vec::new();
+
+    match data.get("output") {
+        Some(Value::Array(arr)) => {
             for block in arr {
-                if block.get("type").and_then(|t| t.as_str()) == Some("message") {
-                    if let Some(content) = block.get("content").and_then(|c| c.as_array()) {
-                        for item in content {
-                            if item.get("type").and_then(|t| t.as_str()) == Some("output_text") {
-                                if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                                    return text.to_string();
+                match block.get("type").and_then(|t| t.as_str()) {
+                    Some("message") => {
+                        if let Some(content) = block.get("content").and_then(|c| c.as_array()) {
+                            for item in content {
+                                if item.get("type").and_then(|t| t.as_str()) == Some("output_text")
+                                {
+                                    if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                                        message.push_str(text);
+                                    }
                                 }
                             }
                         }
                     }
+                    Some("reasoning") => {
+                        if let Some(content) = block.get("content").and_then(|c| c.as_array()) {
+                            for item in content {
+                                if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                                    reasoning_parts.push(text.to_string());
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
-        } else if let Some(s) = output.as_str() {
-            return s.to_string();
         }
+        Some(Value::String(s)) => message.push_str(s),
+        _ => {}
     }
-    String::new()
+
+    ExtractedOutput {
+        message,
+        reasoning_content: if reasoning_parts.is_empty() {
+            None
+        } else {
+            Some(reasoning_parts.join("\n"))
+        },
+    }
 }
 
 async fn send_responses_request(
@@ -109,22 +146,38 @@ async fn send_responses_request(
 
     match client.responses(Value::Object(body)).await {
         Ok(data) => {
-            let message = extract_output_text(&data);
+            let ExtractedOutput {
+                message,
+                reasoning_content,
+            } = extract_output(&data);
             let response_id = data
                 .get("id")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
+            let status = data.get("status").and_then(|v| v.as_str());
             let model = data
                 .get("model")
                 .and_then(|v| v.as_str())
                 .unwrap_or(&model)
                 .to_string();
+
+            let result_message = if message.is_empty() && reasoning_content.is_some() {
+                format!(
+                    "The model used its entire token budget on reasoning and produced no final answer \
+                     (status: {}). See `reasoning_content`; retry with a higher `max_output_tokens`.",
+                    status.unwrap_or("unknown")
+                )
+            } else {
+                "Received response".to_string()
+            };
+
             ToolResult::ok(
-                "Received response",
+                result_message,
                 ResponseData {
                     response_id,
                     message,
+                    reasoning_content,
                     model,
                 },
             )
@@ -277,7 +330,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extracts_text_from_a_realistic_responses_payload() {
+    fn extracts_text_and_reasoning_from_a_realistic_responses_payload() {
         let payload = serde_json::json!({
             "id": "resp_abc123",
             "model": "openai/gpt-oss-20b",
@@ -295,19 +348,35 @@ mod tests {
             ]
         });
 
-        assert_eq!(extract_output_text(&payload), "Hello there!");
+        let out = extract_output(&payload);
+        assert_eq!(out.message, "Hello there!");
+        assert_eq!(out.reasoning_content.as_deref(), Some("thinking..."));
     }
 
     #[test]
     fn falls_back_to_plain_string_output() {
         let payload = serde_json::json!({ "output": "just a string" });
-        assert_eq!(extract_output_text(&payload), "just a string");
+        assert_eq!(extract_output(&payload).message, "just a string");
     }
 
     #[test]
-    fn returns_empty_string_when_no_message_block_present() {
-        let payload = serde_json::json!({ "output": [{ "type": "reasoning", "content": [] }] });
-        assert_eq!(extract_output_text(&payload), "");
+    fn surfaces_reasoning_when_no_message_block_present() {
+        // A model that exhausts max_output_tokens while thinking: a
+        // `reasoning` block but no `message` block.
+        let payload = serde_json::json!({
+            "output": [{ "type": "reasoning", "content": [{ "text": "still thinking..." }] }]
+        });
+        let out = extract_output(&payload);
+        assert_eq!(out.message, "");
+        assert_eq!(out.reasoning_content.as_deref(), Some("still thinking..."));
+    }
+
+    #[test]
+    fn returns_empty_when_output_is_absent_entirely() {
+        let payload = serde_json::json!({});
+        let out = extract_output(&payload);
+        assert_eq!(out.message, "");
+        assert_eq!(out.reasoning_content, None);
     }
 
     #[test]

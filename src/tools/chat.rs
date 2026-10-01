@@ -29,6 +29,11 @@ pub struct ChatCompletionInput {
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ChatCompletionData {
     pub content: String,
+    /// The model's internal "thinking" trace, for reasoning models that
+    /// expose one (e.g. Qwen3's thinking mode). Populated whenever LM
+    /// Studio returns a `reasoning_content` field, even alongside a
+    /// non-empty `content`.
+    pub reasoning_content: Option<String>,
     pub model: Option<String>,
     pub finish_reason: Option<String>,
 }
@@ -73,28 +78,56 @@ fn extract_chat_result(resp: Value) -> ToolResult<ChatCompletionData> {
             resp.to_string(),
         );
     };
-    let content = choice
-        .get("message")
+    let message = choice.get("message");
+    let content = message
         .and_then(|m| m.get("content"))
         .and_then(|c| c.as_str())
         .unwrap_or_default()
         .to_string();
-    if content.is_empty() {
-        return ToolResult::err(
-            "LM Studio returned an empty response",
-            ErrorCode::Unknown,
-            resp.to_string(),
-        );
-    }
+    // Reasoning models (e.g. Qwen3 in thinking mode) emit their internal
+    // deliberation here, separately from `content`. If max_tokens runs out
+    // mid-thought, `content` can legitimately be empty while this is not —
+    // that's a budget problem for the caller to fix, not a failed request.
+    let reasoning_content = message
+        .and_then(|m| m.get("reasoning_content"))
+        .and_then(|c| c.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
     let finish_reason = choice
         .get("finish_reason")
         .and_then(|v| v.as_str())
         .map(String::from);
     let model = resp.get("model").and_then(|v| v.as_str()).map(String::from);
+
+    if content.is_empty() {
+        return if let Some(reasoning) = reasoning_content {
+            ToolResult::ok(
+                format!(
+                    "The model used its entire token budget on reasoning and produced no final answer \
+                     (finish_reason: {}). See `reasoning_content`; retry with a higher `max_tokens`.",
+                    finish_reason.as_deref().unwrap_or("unknown")
+                ),
+                ChatCompletionData {
+                    content,
+                    reasoning_content: Some(reasoning),
+                    model,
+                    finish_reason,
+                },
+            )
+        } else {
+            ToolResult::err(
+                "LM Studio returned an empty response",
+                ErrorCode::Unknown,
+                resp.to_string(),
+            )
+        };
+    }
+
     ToolResult::ok(
         "Generated chat completion",
         ChatCompletionData {
             content,
+            reasoning_content,
             model,
             finish_reason,
         },
