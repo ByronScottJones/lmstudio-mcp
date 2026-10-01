@@ -1,0 +1,12 @@
+/target
+
+# Cargo.lock is intentionally committed (this is a binary crate) — don't ignore it.
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
