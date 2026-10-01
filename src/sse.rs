@@ -52,6 +52,13 @@ pub async fn collect_events(
     let mut buf: Vec<u8> = Vec::new();
     let mut data_lines: Vec<String> = Vec::new();
     let mut events = Vec::new();
+    // Set when a `[DONE]` sentinel is seen (the chat/text-completions
+    // convention). Callers that instead signal completion via `stop_when`
+    // (the /v1/responses endpoint's typed terminal events) never reach the
+    // natural-EOF path below at all on success — they return early. So
+    // either way, reaching natural EOF with this still false means the
+    // connection closed before the response actually finished.
+    let mut saw_completion_signal = false;
 
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -63,7 +70,20 @@ pub async fn collect_events(
         let chunk = match tokio::time::timeout(per_chunk_wait, stream.next()).await {
             Ok(Some(Ok(bytes))) => bytes,
             Ok(Some(Err(e))) => return Err(ClientError::Request(e)),
-            Ok(None) => break, // server closed the connection normally
+            Ok(None) => {
+                // Server closed the connection. Only treat that as a
+                // complete response if we actually saw a completion
+                // signal — otherwise this is a truncated stream (dropped
+                // connection, proxy timeout, crash mid-response) that
+                // would otherwise silently look like a short-but-valid
+                // answer.
+                if !saw_completion_signal {
+                    return Err(ClientError::IncompleteStream {
+                        events_seen: events.len(),
+                    });
+                }
+                break;
+            }
             Err(_) => {
                 // Distinguish "genuinely idle" from "we were already past
                 // the overall deadline and used a shortened wait for it".
@@ -90,6 +110,7 @@ pub async fn collect_events(
                     let payload = data_lines.join("\n");
                     data_lines.clear();
                     if payload == "[DONE]" {
+                        saw_completion_signal = true;
                         continue;
                     }
                     match serde_json::from_str::<Value>(&payload) {
@@ -158,5 +179,80 @@ mod tests {
             events,
             vec![serde_json::json!({"a":1}), serde_json::json!({"a":2})]
         );
+    }
+
+    /// Starts a one-shot raw HTTP server on an OS-assigned local port: it
+    /// accepts a single connection, writes `body` verbatim after minimal
+    /// headers, then closes the socket — closing *before* the headers claim
+    /// (no `Content-Length`, so the client can only tell the body ended by
+    /// the connection closing, exactly like a real chunked SSE stream).
+    /// Returns the base URL to fetch from.
+    async fn serve_once_then_close(body: &'static [u8]) -> String {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // Drain the request so the client's write isn't left hanging.
+            let mut discard = [0u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut discard).await;
+            let headers =
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+            let _ = socket.write_all(headers).await;
+            let _ = socket.write_all(body).await;
+            let _ = socket.shutdown().await;
+            // Socket drops here, closing the connection.
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn errors_on_premature_eof_without_done_sentinel() {
+        // Two well-formed events, then the connection closes without a
+        // "[DONE]" sentinel — simulating a dropped connection mid-stream.
+        let url = serve_once_then_close(b"data: {\"a\":1}\n\ndata: {\"a\":2}\n\n").await;
+        let resp = reqwest::get(&url).await.unwrap();
+
+        let result = collect_events(resp, Duration::from_secs(5), Duration::from_secs(5), |_| {
+            false
+        })
+        .await;
+
+        match result {
+            Err(ClientError::IncompleteStream { events_seen }) => assert_eq!(events_seen, 2),
+            other => panic!("expected IncompleteStream, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn succeeds_when_done_sentinel_is_present() {
+        let url = serve_once_then_close(b"data: {\"a\":1}\n\ndata: [DONE]\n\n").await;
+        let resp = reqwest::get(&url).await.unwrap();
+
+        let events = collect_events(resp, Duration::from_secs(5), Duration::from_secs(5), |_| {
+            false
+        })
+        .await
+        .expect("a stream ending with [DONE] should succeed");
+        assert_eq!(events, vec![serde_json::json!({"a": 1})]);
+    }
+
+    #[tokio::test]
+    async fn succeeds_when_stop_when_fires_before_connection_closes() {
+        // Simulates the /v1/responses style: no "[DONE]", completion is
+        // signaled by a typed terminal event that `stop_when` recognizes.
+        // The connection closing afterward (even abruptly) shouldn't matter
+        // since collect_events already returned.
+        let url = serve_once_then_close(b"data: {\"type\":\"response.completed\"}\n\n").await;
+        let resp = reqwest::get(&url).await.unwrap();
+
+        let events = collect_events(resp, Duration::from_secs(5), Duration::from_secs(5), |v| {
+            v.get("type").and_then(|t| t.as_str()) == Some("response.completed")
+        })
+        .await
+        .expect("stop_when firing should be treated as completion");
+        assert_eq!(events.len(), 1);
     }
 }

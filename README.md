@@ -150,7 +150,10 @@ another one.
 - [LM Studio](https://lmstudio.ai/) running locally with its local server
   enabled (LM Studio → Developer tab → Start Server), on a version that
   exposes the native `/api/v1` REST API.
-- Rust 1.75+ if building from source (see [Building](#building)).
+- Rust 1.80+ if building from source (see [Building](#building)) — the
+  floor is `std::sync::LazyLock` (`src/subagent/guard.rs`), stabilized in
+  1.80; CI builds against the latest stable toolchain rather than pinning
+  or independently testing this exact minimum.
 
 ## Configuration
 

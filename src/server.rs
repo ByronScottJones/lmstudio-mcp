@@ -20,6 +20,10 @@ pub struct LmStudioServer {
     // Separate from `client`'s HTTP client: this one talks to api.github.com,
     // not LM Studio, and carries no LM Studio base URL/auth token.
     github_http: reqwest::Client,
+    // Shared (not just cloned per-call) so every clone of this server sees
+    // the same conversations — see PersonaCache's doc comment for why this
+    // exists at all.
+    personas: Arc<responses::PersonaCache>,
     // Read by the code `#[tool_handler]` generates to dispatch `call_tool`
     // requests; the dead-code lint can't see through that macro expansion.
     #[allow(dead_code)]
@@ -32,6 +36,7 @@ impl LmStudioServer {
             client: Arc::new(client),
             feedback_store: Arc::new(feedback_store),
             github_http: reqwest::Client::new(),
+            personas: Arc::new(responses::PersonaCache::new()),
             tool_router: Self::tool_router(),
         }
     }
@@ -134,7 +139,7 @@ impl LmStudioServer {
         &self,
         Parameters(input): Parameters<responses::StartConversationInput>,
     ) -> Json<crate::types::ToolResult<responses::ResponseData>> {
-        Json(responses::start_conversation(&self.client, input).await)
+        Json(responses::start_conversation(&self.client, &self.personas, input).await)
     }
 
     #[tool(
@@ -144,7 +149,7 @@ impl LmStudioServer {
         &self,
         Parameters(input): Parameters<responses::ContinueConversationInput>,
     ) -> Json<crate::types::ToolResult<responses::ResponseData>> {
-        Json(responses::continue_conversation(&self.client, input).await)
+        Json(responses::continue_conversation(&self.client, &self.personas, input).await)
     }
 
     #[tool(

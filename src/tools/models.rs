@@ -104,6 +104,67 @@ pub(crate) async fn fetch_loaded(
     Ok(loaded_instances(&resp.models))
 }
 
+/// Why [`auto_detect_model`] couldn't pick a model, distinguishing "LM
+/// Studio is reachable but there's nothing/too much loaded" (always
+/// `ModelNotLoaded`) from a genuine client-level failure (connection
+/// refused, unauthorized, timeout, ...), which keeps its own real
+/// [`ErrorCode`] instead of being flattened into `ModelNotLoaded` too.
+#[derive(Debug)]
+pub(crate) enum AutoDetectError {
+    NoneLoaded,
+    Ambiguous(usize),
+    Client(ClientError),
+}
+
+impl AutoDetectError {
+    pub(crate) fn code(&self) -> ErrorCode {
+        match self {
+            AutoDetectError::NoneLoaded | AutoDetectError::Ambiguous(_) => {
+                ErrorCode::ModelNotLoaded
+            }
+            AutoDetectError::Client(e) => e.code(),
+        }
+    }
+}
+
+impl std::fmt::Display for AutoDetectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AutoDetectError::NoneLoaded => write!(
+                f,
+                "No model is currently loaded in LM Studio. Load one first, or pass `model` explicitly."
+            ),
+            AutoDetectError::Ambiguous(n) => write!(
+                f,
+                "{n} models are loaded; pass `model` explicitly to pick one."
+            ),
+            AutoDetectError::Client(e) => write!(f, "Could not detect the currently loaded model: {e}"),
+        }
+    }
+}
+
+/// Pick the model to use when the caller didn't name one explicitly: the
+/// single loaded instance's *identifier* (not its library key — these
+/// differ when the model was loaded with a custom `identifier` via
+/// `load_model`, and the OpenAI-compatible endpoints route by identifier).
+/// Shared by the responses and subagent tools, which both need this.
+pub(crate) async fn auto_detect_model(client: &LmStudioClient) -> Result<String, AutoDetectError> {
+    let models = fetch_loaded(client)
+        .await
+        .map_err(AutoDetectError::Client)?;
+    pick_auto_detected_model(models)
+}
+
+/// The pure selection logic behind [`auto_detect_model`], split out so it's
+/// testable without a live LM Studio connection.
+fn pick_auto_detected_model(models: Vec<LoadedModelSummary>) -> Result<String, AutoDetectError> {
+    match models.len() {
+        1 => Ok(models.into_iter().next().unwrap().identifier),
+        0 => Err(AutoDetectError::NoneLoaded),
+        n => Err(AutoDetectError::Ambiguous(n)),
+    }
+}
+
 fn tool_err<T>(prefix: &str, e: ClientError) -> ToolResult<T> {
     let code = e.code();
     let detail = e.to_string();
@@ -416,6 +477,66 @@ mod tests {
         assert_eq!(
             parsed.models[0].extra.get("a_future_field"),
             Some(&serde_json::json!(123))
+        );
+    }
+
+    fn loaded(identifier: &str, model_key: &str) -> LoadedModelSummary {
+        LoadedModelSummary {
+            identifier: identifier.to_string(),
+            model_key: model_key.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn auto_detect_picks_the_instance_identifier_not_the_model_key() {
+        // Regression: these differ when the model was loaded with a custom
+        // `identifier` (see `load_model`) — the OpenAI-compatible endpoints
+        // route by identifier, so sending the library key would target the
+        // wrong (or a nonexistent) instance.
+        let models = vec![loaded("my-custom-name", "qwen/qwen3.6-35b-a3b")];
+        let picked = pick_auto_detected_model(models).unwrap();
+        assert_eq!(picked, "my-custom-name");
+    }
+
+    #[test]
+    fn auto_detect_errors_when_nothing_is_loaded() {
+        assert!(matches!(
+            pick_auto_detected_model(vec![]),
+            Err(AutoDetectError::NoneLoaded)
+        ));
+    }
+
+    #[test]
+    fn auto_detect_errors_when_multiple_models_are_loaded() {
+        let models = vec![loaded("a", "a"), loaded("b", "b")];
+        assert!(matches!(
+            pick_auto_detected_model(models),
+            Err(AutoDetectError::Ambiguous(2))
+        ));
+    }
+
+    #[test]
+    fn auto_detect_error_codes_distinguish_client_failures_from_loaded_state() {
+        assert_eq!(
+            AutoDetectError::NoneLoaded.code(),
+            ErrorCode::ModelNotLoaded
+        );
+        assert_eq!(
+            AutoDetectError::Ambiguous(3).code(),
+            ErrorCode::ModelNotLoaded
+        );
+        // A connection/auth failure must NOT be flattened into
+        // ModelNotLoaded — that was the bug: every auto-detection failure
+        // (including "LM Studio is unreachable") used to be reported as
+        // "no model loaded", which is actively misleading to debug.
+        let client_err = ClientError::Status {
+            status: 401,
+            body: String::new(),
+        };
+        assert_eq!(
+            AutoDetectError::Client(client_err).code(),
+            ErrorCode::Unauthorized
         );
     }
 }

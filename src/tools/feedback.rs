@@ -345,7 +345,12 @@ pub async fn feedback_submit(
             )
             .await
         {
-            Ok(_action) => {
+            // Only `Accept` means "the human actually opened/will open this
+            // page" — `elicit_url` returns `Decline`/`Cancel` just as
+            // legitimately as the form step does, and those used to be
+            // treated identically to `Accept` here, marking an unreviewed
+            // draft submitted.
+            Ok(ElicitationAction::Accept) => {
                 let _ = store.mark_submitted(entry.id, submit_url.clone());
                 ToolResult::ok(
                     "Handed the pre-filled issue page to the client for review",
@@ -354,6 +359,23 @@ pub async fn feedback_submit(
                         duplicate: false,
                         matched_issue: None,
                         url: Some(submit_url),
+                        duplicate_check,
+                    },
+                )
+            }
+            Ok(review_action) => {
+                let outcome = match review_action {
+                    ElicitationAction::Decline => "declined",
+                    ElicitationAction::Cancel => "cancelled",
+                    _ => "did not accept",
+                };
+                ToolResult::ok(
+                    format!("Not submitted: reviewer {outcome} opening the page"),
+                    FeedbackSubmitOutput {
+                        submitted: false,
+                        duplicate: false,
+                        matched_issue: None,
+                        url: None,
                         duplicate_check,
                     },
                 )
@@ -385,33 +407,75 @@ fn fallback_submit_url(
     url: &str,
     duplicate_check: String,
 ) -> ToolResult<FeedbackSubmitOutput> {
-    open_url_in_browser(url);
-    let _ = store.mark_submitted(id, url.to_string());
-    ToolResult::ok(
-        "Client doesn't support MCP elicitation (or the review timed out) — opened the pre-filled issue page directly in your browser instead. A human still needs to review and click \"Create\" there.",
-        FeedbackSubmitOutput {
-            submitted: true,
-            duplicate: false,
-            matched_issue: None,
-            url: Some(url.to_string()),
-            duplicate_check,
-        },
-    )
+    // Both steps' errors used to be silently discarded (`let _ =`), always
+    // reporting `submitted: true` regardless — including on a headless
+    // Linux host with no `xdg-open`, or a local store write failure. Check
+    // both and only report success when the draft is actually marked
+    // submitted; the URL is still returned either way so a human can open
+    // it by hand if the automatic open failed.
+    let open_result = open_url_in_browser(url);
+    let mark_result = store.mark_submitted(id, url.to_string());
+
+    match (&open_result, &mark_result) {
+        (Ok(()), Ok(_)) => ToolResult::ok(
+            "Client doesn't support MCP elicitation (or the review timed out) — opened the pre-filled issue page directly in your browser instead. A human still needs to review and click \"Create\" there.",
+            FeedbackSubmitOutput {
+                submitted: true,
+                duplicate: false,
+                matched_issue: None,
+                url: Some(url.to_string()),
+                duplicate_check,
+            },
+        ),
+        _ => {
+            let mut problems = Vec::new();
+            if let Err(e) = &open_result {
+                problems.push(format!("couldn't open a browser automatically ({e})"));
+            }
+            if let Err(e) = &mark_result {
+                problems.push(format!("couldn't record it as submitted locally ({e})"));
+            }
+            ToolResult::ok(
+                format!(
+                    "Client doesn't support MCP elicitation (or the review timed out), and the fallback hit a problem: {}. Here's the pre-filled issue URL — open it yourself to finish: {url}",
+                    problems.join("; ")
+                ),
+                FeedbackSubmitOutput {
+                    submitted: false,
+                    duplicate: false,
+                    matched_issue: None,
+                    url: Some(url.to_string()),
+                    duplicate_check,
+                },
+            )
+        }
+    }
 }
 
-fn open_url_in_browser(url: &str) {
+fn open_url_in_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open").arg(url).spawn();
-    }
+    let mut command = {
+        let mut c = std::process::Command::new("open");
+        c.arg(url);
+        c
+    };
     #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn();
-    }
+    let mut command = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", "", url]);
+        c
+    };
     #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-    }
+    let mut command = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+
+    command.spawn().map(|_child| ()).map_err(|e| {
+        format!(
+            "{} failed to launch: {e}",
+            command.get_program().to_string_lossy()
+        )
+    })
 }

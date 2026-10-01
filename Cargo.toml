@@ -16,7 +16,7 @@ path = "src/main.rs"
 rmcp = { version = "3", features = ["server", "macros", "transport-io", "schemars", "elicitation"] }
 
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "process", "net", "io-util"] }
 
 # HTTP client - rustls so there's no OpenSSL system dependency on any platform
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }

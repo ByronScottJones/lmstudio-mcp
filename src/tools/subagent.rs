@@ -61,28 +61,10 @@ pub async fn run_subagent(
 
     let model = match input.model {
         Some(m) => m,
-        None => match super::models::fetch_loaded(client).await {
-            Ok(loaded) if loaded.len() == 1 => loaded[0].model_key.clone(),
-            Ok(loaded) if loaded.is_empty() => {
-                return ToolResult::err(
-                    "No model is currently loaded in LM Studio. Load one first, or pass `model` explicitly.",
-                    ErrorCode::ModelNotLoaded,
-                    "model auto-detection failed: nothing loaded",
-                )
-            }
-            Ok(_) => {
-                return ToolResult::err(
-                    "Multiple models are loaded; pass `model` explicitly to pick the subagent.",
-                    ErrorCode::ModelNotLoaded,
-                    "model auto-detection failed: ambiguous",
-                )
-            }
+        None => match super::models::auto_detect_model(client).await {
+            Ok(m) => m,
             Err(e) => {
-                return ToolResult::err(
-                    format!("Could not detect the currently loaded model: {e}"),
-                    e.code(),
-                    e.to_string(),
-                )
+                return ToolResult::err(e.to_string(), e.code(), "model auto-detection failed")
             }
         },
     };

@@ -11,12 +11,88 @@
 //! sent through as `temperature` / `max_output_tokens`, matching the
 //! Responses API.
 
-use super::models::fetch_loaded;
+use super::models::auto_detect_model;
 use crate::client::LmStudioClient;
 use crate::types::{ErrorCode, ToolResult};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::collections::{HashMap, VecDeque};
+use std::sync::Mutex;
+
+/// Tracks the persona (`instructions`) `start_conversation` locks in, keyed
+/// by the most recent `response_id` in that conversation's chain.
+///
+/// This exists because the Responses API's `instructions` field is **not**
+/// carried forward by `previous_response_id` the way the message history
+/// itself is — it applies only to the single turn it's sent on. Without
+/// this, `start_conversation`'s documented "locked in for the whole
+/// session, no need to resend it" guarantee would silently stop being true
+/// after the first turn. `continue_conversation` looks the persona up by
+/// the incoming `response_id` and resends it as `instructions`, then
+/// re-keys it under the new `response_id` the call returns, so it
+/// propagates indefinitely along the chain.
+///
+/// Bounded FIFO eviction (not a real LRU — good enough for "don't grow
+/// unboundedly over a long-running server session" without pulling in a
+/// dependency for it) rather than ever-growing, since nothing else ever
+/// removes an entry once its conversation is abandoned.
+pub struct PersonaCache {
+    inner: Mutex<PersonaCacheInner>,
+}
+
+struct PersonaCacheInner {
+    personas: HashMap<String, String>,
+    insertion_order: VecDeque<String>,
+}
+
+const MAX_TRACKED_CONVERSATIONS: usize = 500;
+
+impl Default for PersonaCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PersonaCache {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(PersonaCacheInner {
+                personas: HashMap::new(),
+                insertion_order: VecDeque::new(),
+            }),
+        }
+    }
+
+    fn get(&self, response_id: &str) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .personas
+            .get(response_id)
+            .cloned()
+    }
+
+    fn set(&self, response_id: String, persona: String) {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.personas.contains_key(&response_id) {
+            inner.insertion_order.push_back(response_id.clone());
+        }
+        inner.personas.insert(response_id, persona);
+        while inner.insertion_order.len() > MAX_TRACKED_CONVERSATIONS {
+            if let Some(oldest) = inner.insertion_order.pop_front() {
+                inner.personas.remove(&oldest);
+            }
+        }
+    }
+
+    fn remove(&self, response_id: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.personas.remove(response_id);
+        // Left in `insertion_order` (if present) as a harmless tombstone —
+        // it'll just no-op out of `personas` when its turn to evict comes.
+    }
+}
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ResponseData {
@@ -47,20 +123,6 @@ impl ReasoningEffort {
             ReasoningEffort::Medium => "medium",
             ReasoningEffort::High => "high",
         }
-    }
-}
-
-async fn auto_detect_model(client: &LmStudioClient) -> Result<String, String> {
-    match fetch_loaded(client).await {
-        Ok(models) if models.len() == 1 => Ok(models[0].model_key.clone()),
-        Ok(models) if models.is_empty() => Err(
-            "No model is currently loaded in LM Studio. Load one first, or pass `model` explicitly."
-                .to_string(),
-        ),
-        Ok(_) => Err(
-            "Multiple models are loaded; pass `model` explicitly to pick one.".to_string(),
-        ),
-        Err(e) => Err(format!("Could not detect the currently loaded model: {e}")),
     }
 }
 
@@ -123,6 +185,23 @@ fn extract_output(data: &Value) -> ExtractedOutput {
     }
 }
 
+/// If `status` marks this response object as failed, return a detail
+/// string describing why (from an `error` field if present, else a
+/// generic fallback). Returns `None` for any other status, including a
+/// missing one — only an explicit "failed" is treated as failure, since
+/// not every LM Studio version necessarily sets `status` on success.
+fn failure_detail(data: &Value, status: Option<&str>) -> Option<String> {
+    if status != Some("failed") {
+        return None;
+    }
+    Some(
+        data.get("error")
+            .and_then(|e| e.get("message").and_then(|m| m.as_str()).or(e.as_str()))
+            .unwrap_or("LM Studio reported this response as failed, with no further detail")
+            .to_string(),
+    )
+}
+
 async fn send_responses_request(
     client: &LmStudioClient,
     mut body: Map<String, Value>,
@@ -132,12 +211,11 @@ async fn send_responses_request(
         Some(m) => m,
         None => match auto_detect_model(client).await {
             Ok(m) => m,
-            Err(msg) => {
-                return ToolResult::err(
-                    msg,
-                    ErrorCode::ModelNotLoaded,
-                    "model auto-detection failed",
-                )
+            // Preserves the real error code (connection/auth failure vs.
+            // genuinely no/too many models loaded) instead of reporting
+            // every auto-detection failure as ModelNotLoaded.
+            Err(e) => {
+                return ToolResult::err(e.to_string(), e.code(), "model auto-detection failed")
             }
         },
     };
@@ -163,6 +241,21 @@ async fn send_responses_request(
                 .and_then(|v| v.as_str())
                 .unwrap_or(&model)
                 .to_string();
+
+            // A terminal `response.failed` event is merged the same way a
+            // successful one is (see `merge_responses_stream`/
+            // `is_terminal_response_event`) — it has to be, since the
+            // stream reader only knows "this is a terminal event", not
+            // "this terminal event means success". Check for it here,
+            // where the actual meaning is known, rather than reporting an
+            // LM Studio-side failure as a successful empty response.
+            if let Some(detail) = failure_detail(&data, status) {
+                return ToolResult::err(
+                    format!("Request to LM Studio failed: {detail}"),
+                    ErrorCode::Unknown,
+                    detail,
+                );
+            }
 
             let result_message = if message.is_empty() && reasoning_content.is_some() {
                 format!(
@@ -266,11 +359,15 @@ pub struct StartConversationInput {
 
 pub async fn start_conversation(
     client: &LmStudioClient,
+    personas: &PersonaCache,
     input: StartConversationInput,
 ) -> ToolResult<ResponseData> {
     let mut body = Map::new();
     body.insert("input".into(), Value::String(input.first_message));
-    body.insert("instructions".into(), Value::String(input.system_prompt));
+    body.insert(
+        "instructions".into(),
+        Value::String(input.system_prompt.clone()),
+    );
     body.insert(
         "temperature".into(),
         Value::from(input.temperature.unwrap_or(0.7)),
@@ -280,7 +377,13 @@ pub async fn start_conversation(
         Value::from(input.max_output_tokens.unwrap_or(2048)),
     );
 
-    send_responses_request(client, body, input.model).await
+    let result = send_responses_request(client, body, input.model).await;
+    if let Some(data) = &result.data {
+        if !data.response_id.is_empty() {
+            personas.set(data.response_id.clone(), input.system_prompt);
+        }
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -307,14 +410,24 @@ pub struct ContinueConversationInput {
 
 pub async fn continue_conversation(
     client: &LmStudioClient,
+    personas: &PersonaCache,
     input: ContinueConversationInput,
 ) -> ToolResult<ResponseData> {
+    // The Responses API doesn't carry `instructions` forward via
+    // `previous_response_id` on its own — see `PersonaCache`'s doc comment.
+    // Re-send whatever `start_conversation` locked in, if we're still
+    // tracking it.
+    let persona = personas.get(&input.response_id);
+
     let mut body = Map::new();
     body.insert("input".into(), Value::String(input.message));
     body.insert(
         "previous_response_id".into(),
-        Value::String(input.response_id),
+        Value::String(input.response_id.clone()),
     );
+    if let Some(persona) = &persona {
+        body.insert("instructions".into(), Value::String(persona.clone()));
+    }
     body.insert(
         "temperature".into(),
         Value::from(input.temperature.unwrap_or(0.7)),
@@ -324,12 +437,86 @@ pub async fn continue_conversation(
         Value::from(input.max_output_tokens.unwrap_or(2048)),
     );
 
-    send_responses_request(client, body, input.model).await
+    let result = send_responses_request(client, body, input.model).await;
+    if let Some(persona) = persona {
+        if let Some(data) = &result.data {
+            if !data.response_id.is_empty() {
+                // Propagate to the new response_id so the next continuation
+                // in the chain can still find it.
+                personas.set(data.response_id.clone(), persona);
+            }
+        }
+        personas.remove(&input.response_id);
+    }
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persona_cache_round_trips() {
+        let cache = PersonaCache::new();
+        assert_eq!(cache.get("resp_1"), None);
+        cache.set("resp_1".to_string(), "be a pirate".to_string());
+        assert_eq!(cache.get("resp_1"), Some("be a pirate".to_string()));
+    }
+
+    #[test]
+    fn persona_cache_remove_forgets_the_entry() {
+        let cache = PersonaCache::new();
+        cache.set("resp_1".to_string(), "be a pirate".to_string());
+        cache.remove("resp_1");
+        assert_eq!(cache.get("resp_1"), None);
+    }
+
+    #[test]
+    fn persona_cache_evicts_oldest_once_over_capacity() {
+        let cache = PersonaCache::new();
+        for i in 0..(MAX_TRACKED_CONVERSATIONS + 10) {
+            cache.set(format!("resp_{i}"), "persona".to_string());
+        }
+        // The earliest entries should have been evicted...
+        assert_eq!(cache.get("resp_0"), None);
+        assert_eq!(cache.get("resp_9"), None);
+        // ...but the most recent MAX_TRACKED_CONVERSATIONS are still there.
+        assert_eq!(
+            cache.get(&format!("resp_{}", MAX_TRACKED_CONVERSATIONS + 9)),
+            Some("persona".to_string())
+        );
+    }
+
+    #[test]
+    fn failure_detail_none_for_completed_status() {
+        let data = serde_json::json!({"status": "completed"});
+        assert_eq!(failure_detail(&data, Some("completed")), None);
+    }
+
+    #[test]
+    fn failure_detail_none_for_missing_status() {
+        let data = serde_json::json!({});
+        assert_eq!(failure_detail(&data, None), None);
+    }
+
+    #[test]
+    fn failure_detail_extracts_error_message_when_failed() {
+        let data = serde_json::json!({
+            "status": "failed",
+            "error": {"message": "the model crashed"}
+        });
+        assert_eq!(
+            failure_detail(&data, Some("failed")),
+            Some("the model crashed".to_string())
+        );
+    }
+
+    #[test]
+    fn failure_detail_falls_back_to_generic_message_when_no_error_field() {
+        let data = serde_json::json!({"status": "failed"});
+        let detail = failure_detail(&data, Some("failed")).unwrap();
+        assert!(detail.contains("no further detail"));
+    }
 
     #[test]
     fn extracts_text_and_reasoning_from_a_realistic_responses_payload() {

@@ -252,7 +252,11 @@ fn compact_args(args: &Value) -> String {
     map.iter()
         .map(|(k, v)| {
             let v_str = match v {
-                Value::String(s) if s.len() > 60 => format!("\"{}...\"", &s[..60]),
+                // Truncate by character count, not byte offset — `s[..60]`
+                // panics if byte 60 falls inside a multibyte character.
+                Value::String(s) if s.chars().count() > 60 => {
+                    format!("\"{}...\"", s.chars().take(60).collect::<String>())
+                }
                 Value::String(s) => format!("\"{s}\""),
                 other => other.to_string(),
             };
@@ -284,5 +288,16 @@ mod tests {
     #[test]
     fn compact_args_handles_non_object() {
         assert_eq!(compact_args(&Value::Null), "");
+    }
+
+    #[test]
+    fn compact_args_truncates_multibyte_strings_without_panicking() {
+        // Regression: byte-index slicing (`&s[..60]`) panics if byte 60
+        // falls inside a multibyte UTF-8 character. 4-byte emoji repeated
+        // past the old 60-byte cutoff reliably hits that case.
+        let long = "🦀".repeat(80); // 320 bytes, 80 chars — over the 60-char threshold
+        let args = json!({"content": long});
+        let out = compact_args(&args); // must not panic
+        assert!(out.contains("..."));
     }
 }

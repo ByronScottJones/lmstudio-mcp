@@ -13,6 +13,7 @@
 
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use tokio::io::AsyncReadExt;
 
 #[derive(
     Debug,
@@ -120,7 +121,14 @@ fn normalize_lexically(path: &Path) -> PathBuf {
 
 fn truncate_for_output(mut s: String, label: &str) -> String {
     if s.len() > MAX_IO_BYTES {
-        s.truncate(MAX_IO_BYTES);
+        // `String::truncate` panics unless the cut point lands on a char
+        // boundary; walk back from the byte limit to the nearest one
+        // rather than assuming MAX_IO_BYTES itself lands cleanly.
+        let mut cut = MAX_IO_BYTES;
+        while !s.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        s.truncate(cut);
         s.push_str(&format!(
             "\n\n...[{label} truncated at {MAX_IO_BYTES} bytes]"
         ));
@@ -242,10 +250,35 @@ fn arg_str<'a>(arguments: &'a Value, key: &str) -> Result<&'a str, String> {
 
 async fn read_file(ctx: &SubagentContext, arguments: &Value) -> Result<String, String> {
     let path = sandboxed_path(ctx, arg_str(arguments, "path")?)?;
-    let content = tokio::fs::read_to_string(&path)
+
+    // Cap bytes actually read from disk at MAX_IO_BYTES, rather than
+    // reading the whole file and truncating the resulting String — a
+    // large file (gigabytes) would otherwise be fully loaded into memory
+    // first, defeating the point of the limit.
+    let mut file = tokio::fs::File::open(&path)
         .await
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-    Ok(truncate_for_output(content, "file content"))
+    let file_size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+
+    let mut buf = Vec::with_capacity((file_size as usize).min(MAX_IO_BYTES) + 1);
+    (&mut file)
+        .take(MAX_IO_BYTES as u64)
+        .read_to_end(&mut buf)
+        .await
+        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+
+    // `from_utf8_lossy` rather than `String::from_utf8` — a cut made at an
+    // arbitrary byte offset (when the file is larger than the limit) can
+    // land mid-character; replace it with U+FFFD instead of failing the
+    // whole read over the last few bytes.
+    let content = String::from_utf8_lossy(&buf).into_owned();
+    if file_size as usize > MAX_IO_BYTES {
+        Ok(format!(
+            "{content}\n\n...[file content truncated at {MAX_IO_BYTES} bytes (file is {file_size} bytes)]"
+        ))
+    } else {
+        Ok(content)
+    }
 }
 
 async fn list_directory(ctx: &SubagentContext, arguments: &Value) -> Result<String, String> {
@@ -316,6 +349,15 @@ async fn search_files(ctx: &SubagentContext, arguments: &Value) -> Result<String
             let Ok(meta) = entry.metadata().await else {
                 continue;
             };
+            // `DirEntry::metadata()` reports the entry itself (lstat-like —
+            // it does not follow a final symlink), so this is reachable for
+            // a symlink and both `is_dir()`/`is_file()` below are false for
+            // one either way; skip explicitly rather than relying on that
+            // as an accidental side effect, so a symlink can never be used
+            // to read or recurse outside `working_directory`.
+            if meta.file_type().is_symlink() {
+                continue;
+            }
             if meta.is_dir() {
                 // Skip the usual noisy directories that are never worth scanning.
                 let name = entry.file_name();
@@ -387,7 +429,18 @@ async fn write_file(ctx: &SubagentContext, arguments: &Value) -> Result<String, 
 async fn run_command(ctx: &SubagentContext, arguments: &Value) -> Result<String, String> {
     let command = arg_str(arguments, "command")?;
     super::guard::check(command)?;
+    run_shell_command(&ctx.working_directory, command, COMMAND_TIMEOUT).await
+}
 
+/// Runs `command` in a shell under `cwd`, bounded by `timeout`. Split out
+/// from [`run_command`] (which always passes [`COMMAND_TIMEOUT`]) so tests
+/// can exercise the timeout/kill behavior without waiting out the real
+/// production timeout.
+async fn run_shell_command(
+    cwd: &Path,
+    command: &str,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
     let mut cmd = if cfg!(windows) {
         let mut c = tokio::process::Command::new("cmd");
         c.args(["/C", command]);
@@ -397,12 +450,17 @@ async fn run_command(ctx: &SubagentContext, arguments: &Value) -> Result<String,
         c.args(["-c", command]);
         c
     };
-    cmd.current_dir(&ctx.working_directory);
+    cmd.current_dir(cwd);
     cmd.stdin(std::process::Stdio::null());
+    // Without this, the `tokio::time::timeout` below only stops *waiting*
+    // on the child when it fires — the process itself keeps running
+    // unsupervised. This makes dropping the in-flight `cmd.output()`
+    // future (which owns the spawned `Child`) actually kill it.
+    cmd.kill_on_drop(true);
 
-    let output = tokio::time::timeout(COMMAND_TIMEOUT, cmd.output())
+    let output = tokio::time::timeout(timeout, cmd.output())
         .await
-        .map_err(|_| format!("command timed out after {COMMAND_TIMEOUT:?}"))?
+        .map_err(|_| format!("command timed out after {timeout:?}"))?
         .map_err(|e| format!("failed to run command: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -434,6 +492,22 @@ mod tests {
 
     fn ctx(dir: &Path, cap: Capability) -> SubagentContext {
         SubagentContext::new(dir, cap).unwrap()
+    }
+
+    #[test]
+    fn truncate_for_output_does_not_panic_on_a_multibyte_boundary() {
+        // Regression: `String::truncate` panics unless the cut point is a
+        // char boundary. "€" is 3 bytes/char, and MAX_IO_BYTES (200_000)
+        // isn't a multiple of 3, so a naive cut at that byte offset is
+        // guaranteed to land mid-character.
+        assert_ne!(
+            MAX_IO_BYTES % 3,
+            0,
+            "test assumption: cutoff must not be 3-byte-aligned"
+        );
+        let s = "€".repeat(MAX_IO_BYTES / 3 + 10);
+        let out = truncate_for_output(s, "test"); // must not panic
+        assert!(out.contains("truncated"));
     }
 
     #[test]
@@ -486,6 +560,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_file_caps_output_at_max_io_bytes_for_an_oversized_file() {
+        // Regression: this used to read the whole file into memory (via
+        // `read_to_string`) before truncating the resulting String — a
+        // large file would be fully buffered regardless of the limit.
+        // `read_file` now caps the actual disk read itself (`.take(...)`),
+        // so this also checks the byte count read back is bounded, not
+        // just that the *output string* happens to look truncated.
+        let dir = temp_dir("read-cap");
+        let big = "x".repeat(MAX_IO_BYTES + 50_000);
+        std::fs::write(dir.join("big.txt"), &big).unwrap();
+
+        let c = ctx(&dir, Capability::ReadOnly);
+        let out = execute(&c, "read_file", &json!({"path": "big.txt"}))
+            .await
+            .unwrap();
+
+        assert!(out.contains("truncated"));
+        assert!(out.contains(&format!("file is {} bytes", big.len())));
+        // The content portion (before the appended truncation note) must
+        // not exceed what was actually read from disk.
+        let content_len = out.find("\n\n...[file content truncated").unwrap();
+        assert!(content_len <= MAX_IO_BYTES);
+    }
+
+    #[tokio::test]
     async fn write_file_denied_at_read_only_tier() {
         let dir = temp_dir("readonly-write");
         let c = ctx(&dir, Capability::ReadOnly);
@@ -520,6 +619,31 @@ mod tests {
         assert!(out.contains("exit status: 0"));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timed_out_command_is_actually_killed_not_left_running() {
+        // Regression: wrapping `cmd.output()` in `tokio::time::timeout`
+        // without `kill_on_drop(true)` stops *waiting* on the child when
+        // the timeout fires, but leaves the process itself running
+        // unsupervised. Prove the fix by timing out a command that would,
+        // if left alive, write a marker file after the test has already
+        // moved on — and confirming that file never appears.
+        let dir = temp_dir("kill-on-timeout");
+        let marker = dir.join("marker.txt");
+        let command = format!("sleep 2 && touch {}", marker.display());
+
+        let result = run_shell_command(&dir, &command, std::time::Duration::from_millis(200)).await;
+        assert!(result.is_err(), "expected a timeout error");
+
+        // Give the (correctly killed) process more than enough time to have
+        // written the marker if it were still alive, then confirm it never did.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert!(
+            !marker.exists(),
+            "process kept running past the timeout and wrote its marker file"
+        );
+    }
+
     #[tokio::test]
     async fn run_command_blocks_guarded_patterns() {
         let dir = temp_dir("shell-guard");
@@ -552,6 +676,24 @@ mod tests {
             .unwrap();
         assert!(out.contains("a.txt:1"));
         assert!(!out.contains("b.txt"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn search_files_does_not_follow_a_symlink_outside_the_working_directory() {
+        let dir = temp_dir("search-symlink-in");
+        let outside = temp_dir("search-symlink-out");
+        std::fs::write(outside.join("secret.txt"), "the-secret-needle\n").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("escape")).unwrap();
+
+        let c = ctx(&dir, Capability::ReadOnly);
+        let out = execute(&c, "search_files", &json!({"query": "the-secret-needle"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            out, "no matches",
+            "search_files must not follow a symlink out of the sandbox"
+        );
     }
 
     #[tokio::test]

@@ -89,6 +89,8 @@ pub enum ClientError {
     Decode(serde_json::Error),
     #[error("request error: {0}")]
     Request(reqwest::Error),
+    #[error("the server closed the connection before the response completed ({events_seen} event(s) received, no completion signal)")]
+    IncompleteStream { events_seen: usize },
 }
 
 impl ClientError {
@@ -106,6 +108,7 @@ impl ClientError {
             ClientError::Request(e) if e.is_connect() => ErrorCode::ConnectionFailed,
             ClientError::Request(e) if e.is_timeout() => ErrorCode::Timeout,
             ClientError::Request(_) => ErrorCode::Unknown,
+            ClientError::IncompleteStream { .. } => ErrorCode::ConnectionFailed,
         }
     }
 }

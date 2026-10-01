@@ -26,6 +26,15 @@ struct Pattern {
     reason: &'static str,
 }
 
+/// Matches a command token by basename at the start of a command or just
+/// after a shell operator/whitespace, same as a plain `(^|[;&|\s])(word)(\s|$)`
+/// — except an optional path prefix (`/usr/bin/`, `./`, `../bin/`, `C:\`) is
+/// allowed between the boundary and the word, so invoking the same binary
+/// by an absolute or relative path doesn't bypass the match.
+fn boundary(words: &str) -> String {
+    format!(r"(?i)(^|[;&|\s])(?:[^\s;&|]*[/\\])?({words})(\s|$)")
+}
+
 static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     let p = |name, pattern: &str, reason| Pattern {
         name,
@@ -35,7 +44,7 @@ static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     vec![
         p(
             "sudo/su/doas",
-            r"(?i)(^|[;&|\s])(sudo|doas|su)(\s|$)",
+            &boundary("sudo|doas|su"),
             "privilege escalation",
         ),
         p(
@@ -65,7 +74,7 @@ static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
         ),
         p(
             "shutdown/reboot",
-            r"(?i)(^|[;&|\s])(shutdown|reboot|halt|poweroff)(\s|$)",
+            &boundary("shutdown|reboot|halt|poweroff"),
             "powers off or restarts the machine",
         ),
         p("fork bomb", r":\(\)\s*\{[^}]*:\s*\|\s*:", "fork bomb"),
@@ -107,6 +116,22 @@ mod tests {
     fn blocks_sudo() {
         assert!(check("sudo rm something").is_err());
         assert!(check("echo hi && sudo ls").is_err());
+    }
+
+    #[test]
+    fn blocks_sudo_invoked_by_absolute_or_relative_path() {
+        // Regression: an absolute/relative path to the same binary used to
+        // bypass the guard, since the old pattern required the character
+        // right before "sudo" to be whitespace/operator/start — `/` wasn't
+        // in that set.
+        assert!(check("/usr/bin/sudo rm something").is_err());
+        assert!(check("./sudo ls").is_err());
+        assert!(check("../../bin/sudo ls").is_err());
+    }
+
+    #[test]
+    fn blocks_shutdown_invoked_by_absolute_path() {
+        assert!(check("/sbin/shutdown -h now").is_err());
     }
 
     #[test]
