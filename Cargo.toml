@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "MCP server bridging Claude (and other MCP clients) to a local LM Studio instance — inference and model management, cross-platform (macOS, Windows, Linux)."
 license = "MIT"
-repository = "https://github.com/byronjones/lmstudio-mcp"
+repository = "https://github.com/ByronScottJones/lmstudio-mcp"
 readme = "README.md"
 
 [[bin]]

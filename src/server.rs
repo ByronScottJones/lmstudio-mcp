@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 /// This server's own repo — the default target for `feedback_submit` /
 /// `feedback_check_duplicates` when the caller doesn't pass `repo`.
-const DEFAULT_FEEDBACK_REPO: &str = "byronjones/lmstudio-mcp";
+const DEFAULT_FEEDBACK_REPO: &str = "ByronScottJones/lmstudio-mcp";
 
 #[derive(Clone)]
 pub struct LmStudioServer {
