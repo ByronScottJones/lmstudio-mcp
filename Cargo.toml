@@ -13,13 +13,15 @@ path = "src/main.rs"
 
 [dependencies]
 # MCP server SDK (official Rust SDK from the Model Context Protocol org)
-rmcp = { version = "3", features = ["server", "macros", "transport-io", "schemars"] }
+rmcp = { version = "3", features = ["server", "macros", "transport-io", "schemars", "elicitation"] }
 
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "process"] }
 
 # HTTP client - rustls so there's no OpenSSL system dependency on any platform
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+futures-util = "0.3"
+url = "2"
 
 # JSON / schema
 serde = { version = "1", features = ["derive"] }
@@ -30,9 +32,15 @@ schemars = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Cross-platform home directory resolution (for ~/.lmstudio-mcp/feedback.json)
+dirs = "6"
+
 # Misc
 thiserror = "2"
 anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+regex = "1"
+uuid = { version = "1", features = ["v4"] }
 
 [profile.release]
 opt-level = "z"

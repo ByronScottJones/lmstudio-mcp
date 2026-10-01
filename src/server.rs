@@ -2,15 +2,24 @@
 //! the `rmcp` tool-call dispatch machinery.
 
 use crate::client::LmStudioClient;
-use crate::tools::{chat, embeddings, health_check, models, responses};
+use crate::feedback::store::FeedbackStore;
+use crate::tools::{chat, embeddings, feedback, health_check, models, responses, subagent};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
-use rmcp::{tool, tool_handler, tool_router, ServerHandler};
+use rmcp::{tool, tool_handler, tool_router, Peer, RoleServer, ServerHandler};
 use std::sync::Arc;
+
+/// This server's own repo — the default target for `feedback_submit` /
+/// `feedback_check_duplicates` when the caller doesn't pass `repo`.
+const DEFAULT_FEEDBACK_REPO: &str = "byronjones/lmstudio-mcp";
 
 #[derive(Clone)]
 pub struct LmStudioServer {
     client: Arc<LmStudioClient>,
+    feedback_store: Arc<FeedbackStore>,
+    // Separate from `client`'s HTTP client: this one talks to api.github.com,
+    // not LM Studio, and carries no LM Studio base URL/auth token.
+    github_http: reqwest::Client,
     // Read by the code `#[tool_handler]` generates to dispatch `call_tool`
     // requests; the dead-code lint can't see through that macro expansion.
     #[allow(dead_code)]
@@ -18,9 +27,11 @@ pub struct LmStudioServer {
 }
 
 impl LmStudioServer {
-    pub fn new(client: LmStudioClient) -> Self {
+    pub fn new(client: LmStudioClient, feedback_store: FeedbackStore) -> Self {
         Self {
             client: Arc::new(client),
+            feedback_store: Arc::new(feedback_store),
+            github_http: reqwest::Client::new(),
             tool_router: Self::tool_router(),
         }
     }
@@ -135,11 +146,100 @@ impl LmStudioServer {
     ) -> Json<crate::types::ToolResult<responses::ResponseData>> {
         Json(responses::continue_conversation(&self.client, input).await)
     }
+
+    #[tool(
+        description = "Delegate a task to a local LM Studio model acting as a subagent, with its own sandboxed tools (read_file, list_directory, search_files, and — depending on `capability` — write_file, run_command). Comparable to how Claude Code spawns a subagent: it works autonomously across as many tool calls as it needs and you get back a final report, not the full transcript. Good for offloading well-scoped, lower-level work (investigate a directory, make a specific edit, run and interpret a build/test command) from a local model instead of doing it yourself."
+    )]
+    async fn run_subagent(
+        &self,
+        Parameters(input): Parameters<subagent::RunSubagentInput>,
+    ) -> Json<crate::types::ToolResult<crate::subagent::runner::SubagentReport>> {
+        Json(subagent::run_subagent(&self.client, input).await)
+    }
+
+    #[tool(
+        description = "Draft a new local feedback entry (issue/error/recommendation) about this server. Stored locally only — nothing leaves this machine until feedback_submit is called."
+    )]
+    async fn feedback_create(
+        &self,
+        Parameters(input): Parameters<feedback::FeedbackCreateInput>,
+    ) -> Json<crate::types::ToolResult<crate::feedback::store::FeedbackEntry>> {
+        Json(feedback::feedback_create(&self.feedback_store, input))
+    }
+
+    #[tool(description = "List all local feedback entries (drafts and submitted).")]
+    async fn feedback_list(
+        &self,
+    ) -> Json<crate::types::ToolResult<Vec<crate::feedback::store::FeedbackEntry>>> {
+        Json(feedback::feedback_list(&self.feedback_store))
+    }
+
+    #[tool(description = "Show one local feedback entry in full.")]
+    async fn feedback_get(
+        &self,
+        Parameters(input): Parameters<feedback::FeedbackIdInput>,
+    ) -> Json<crate::types::ToolResult<crate::feedback::store::FeedbackEntry>> {
+        Json(feedback::feedback_get(&self.feedback_store, input))
+    }
+
+    #[tool(description = "Edit a local feedback entry's category, title, and/or body.")]
+    async fn feedback_update(
+        &self,
+        Parameters(input): Parameters<feedback::FeedbackUpdateInput>,
+    ) -> Json<crate::types::ToolResult<crate::feedback::store::FeedbackEntry>> {
+        Json(feedback::feedback_update(&self.feedback_store, input))
+    }
+
+    #[tool(description = "Delete a local feedback entry.")]
+    async fn feedback_delete(
+        &self,
+        Parameters(input): Parameters<feedback::FeedbackIdInput>,
+    ) -> Json<crate::types::ToolResult<()>> {
+        Json(feedback::feedback_delete(&self.feedback_store, input))
+    }
+
+    #[tool(
+        description = "Check a local feedback entry's title against this repo's existing GitHub issues, without submitting anything. feedback_submit runs this same check automatically."
+    )]
+    async fn feedback_check_duplicates(
+        &self,
+        Parameters(input): Parameters<feedback::CheckDuplicatesInput>,
+    ) -> Json<crate::types::ToolResult<feedback::CheckDuplicatesOutput>> {
+        Json(
+            feedback::feedback_check_duplicates(
+                &self.feedback_store,
+                &self.github_http,
+                DEFAULT_FEEDBACK_REPO,
+                input,
+            )
+            .await,
+        )
+    }
+
+    #[tool(
+        description = "Submit a local feedback entry to GitHub. Never files the issue directly through the API: first checks for an existing duplicate issue (discarding the local draft without submitting if one matches), then asks the connected client to let a human review — and optionally edit — the title/body via MCP elicitation, then hands the client a pre-filled \"new issue\" page to open via a second elicitation. A human still has to click \"Create\" there. If the client doesn't support elicitation, falls back to opening that page directly in this machine's browser instead."
+    )]
+    async fn feedback_submit(
+        &self,
+        Parameters(input): Parameters<feedback::FeedbackSubmitInput>,
+        peer: Peer<RoleServer>,
+    ) -> Json<crate::types::ToolResult<feedback::FeedbackSubmitOutput>> {
+        Json(
+            feedback::feedback_submit(
+                &self.feedback_store,
+                &self.github_http,
+                DEFAULT_FEEDBACK_REPO,
+                input,
+                peer,
+            )
+            .await,
+        )
+    }
 }
 
 #[tool_handler(
     name = "lmstudio-mcp",
     version = "0.1.0",
-    instructions = "Bridge to a local LM Studio instance: inference (chat, text completion, embeddings, stateful conversations) and model management (list, load, unload). Run health_check first to confirm LM Studio is reachable."
+    instructions = "Bridge to a local LM Studio instance: inference (chat, text completion, embeddings, stateful conversations), model management (list, load, unload), delegating work to a local model as a sandboxed subagent (run_subagent), and filing feedback about this server itself as GitHub issues (feedback_*). Run health_check first to confirm LM Studio is reachable."
 )]
 impl ServerHandler for LmStudioServer {}

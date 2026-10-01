@@ -3,7 +3,10 @@
 
 mod client;
 mod config;
+mod feedback;
 mod server;
+mod sse;
+mod subagent;
 mod tools;
 mod types;
 
@@ -32,7 +35,8 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let client = LmStudioClient::new(&config);
-    let server = LmStudioServer::new(client);
+    let feedback_store = feedback::store::FeedbackStore::new()?;
+    let server = LmStudioServer::new(client, feedback_store);
 
     let running = server.serve(stdio()).await?;
 

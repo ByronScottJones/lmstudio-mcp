@@ -142,7 +142,9 @@ async fn send_responses_request(
         },
     };
     body.insert("model".into(), Value::String(model.clone()));
-    body.insert("stream".into(), Value::Bool(false));
+    // `LmStudioClient::responses` always requests this with "stream": true
+    // internally (see its doc comment) and reassembles the result, so
+    // nothing needs setting here.
 
     match client.responses(Value::Object(body)).await {
         Ok(data) => {

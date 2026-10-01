@@ -116,11 +116,21 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Extended timeout for model loading, which can take a while for large models.
 pub const LOAD_MODEL_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Timeout for text-generation calls (chat/text completions, embeddings,
-/// responses). Local inference — especially a reasoning model "thinking"
-/// at length before it emits a final answer — can easily run well past
-/// `DEFAULT_TIMEOUT`, so these get a much longer budget.
+/// Timeout for the (non-streaming) embeddings call. Generation-shaped
+/// endpoints use the streaming idle/max-duration pair below instead, since
+/// a single total-duration timeout can't be made both short enough to
+/// catch a hung connection and long enough for a slow reasoning model.
 pub const INFERENCE_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Chat/text completions and `/v1/responses` are requested with
+/// `"stream": true` specifically so these two bound the read by *activity*
+/// instead of total duration: `STREAM_IDLE_TIMEOUT` is how long we'll wait
+/// between consecutive chunks before concluding the connection is dead,
+/// reset on every chunk that actually arrives; `STREAM_MAX_DURATION` is an
+/// outer safety net independent of activity, in case something is
+/// pathologically generating forever.
+pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+pub const STREAM_MAX_DURATION: Duration = Duration::from_secs(900);
 
 /// Wrap a future with a timeout, mapping elapsed time to [`ClientError::Timeout`].
 pub async fn with_timeout<F, T>(fut: F, timeout: Duration) -> Result<T, ClientError>
