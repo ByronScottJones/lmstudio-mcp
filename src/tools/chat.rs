@@ -1,7 +1,7 @@
 //! Inference tools over the OpenAI-compatible endpoints: chat_completion,
 //! text_completion.
 
-use crate::client::LmStudioClient;
+use crate::client::ApiClient;
 use crate::types::{ErrorCode, ToolResult};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -39,7 +39,7 @@ pub struct ChatCompletionData {
 }
 
 pub async fn chat_completion(
-    client: &LmStudioClient,
+    client: &ApiClient,
     input: ChatCompletionInput,
 ) -> ToolResult<ChatCompletionData> {
     let mut messages = Vec::new();
@@ -161,7 +161,7 @@ pub struct TextCompletionData {
 }
 
 pub async fn text_completion(
-    client: &LmStudioClient,
+    client: &ApiClient,
     input: TextCompletionInput,
 ) -> ToolResult<TextCompletionData> {
     let mut body = Map::new();

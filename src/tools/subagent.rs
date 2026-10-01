@@ -2,7 +2,7 @@
 //! model acting as a subagent, with its own sandboxed tools. See
 //! `src/subagent/` for the agentic loop, tool sandbox, and safety guard.
 
-use crate::client::LmStudioClient;
+use crate::client::ApiClient;
 use crate::subagent::runner::{self, SubagentConfig, SubagentReport};
 use crate::subagent::tools::Capability;
 use crate::types::{ErrorCode, ToolResult};
@@ -44,7 +44,7 @@ pub struct RunSubagentInput {
 }
 
 pub async fn run_subagent(
-    client: &LmStudioClient,
+    client: &ApiClient,
     input: RunSubagentInput,
 ) -> ToolResult<SubagentReport> {
     let working_directory = PathBuf::from(&input.working_directory);

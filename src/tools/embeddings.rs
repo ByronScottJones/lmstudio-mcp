@@ -1,7 +1,7 @@
 //! generate_embeddings tool, over the OpenAI-compatible `/v1/embeddings` endpoint.
 
-use crate::client::LmStudioClient;
-use crate::types::ToolResult;
+use crate::client::ApiClient;
+use crate::types::{ErrorCode, ToolResult};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -33,9 +33,16 @@ pub struct EmbeddingsData {
 }
 
 pub async fn generate_embeddings(
-    client: &LmStudioClient,
+    client: &ApiClient,
     input: GenerateEmbeddingsInput,
 ) -> ToolResult<EmbeddingsData> {
+    if !client.provider().supports_embeddings() {
+        return ToolResult::err(
+            format!("{} has no embeddings endpoint", client.provider()),
+            ErrorCode::InvalidInput,
+            "this provider does not support generate_embeddings",
+        );
+    }
     let text_value = match input.text {
         EmbeddingText::Single(s) => Value::String(s),
         EmbeddingText::Batch(v) => Value::from(v),

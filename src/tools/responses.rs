@@ -12,7 +12,7 @@
 //! Responses API.
 
 use super::models::auto_detect_model;
-use crate::client::LmStudioClient;
+use crate::client::ApiClient;
 use crate::types::{ErrorCode, ToolResult};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -203,10 +203,20 @@ fn failure_detail(data: &Value, status: Option<&str>) -> Option<String> {
 }
 
 async fn send_responses_request(
-    client: &LmStudioClient,
+    client: &ApiClient,
     mut body: Map<String, Value>,
     model: Option<String>,
 ) -> ToolResult<ResponseData> {
+    if !client.provider().supports_responses_api() {
+        return ToolResult::err(
+            format!(
+                "{} has no /v1/responses endpoint — use chat_completion instead, which works on every provider",
+                client.provider()
+            ),
+            ErrorCode::InvalidInput,
+            "this provider does not support create_response/start_conversation/continue_conversation",
+        );
+    }
     let model = match model {
         Some(m) => m,
         None => match auto_detect_model(client).await {
@@ -220,7 +230,7 @@ async fn send_responses_request(
         },
     };
     body.insert("model".into(), Value::String(model.clone()));
-    // `LmStudioClient::responses` always requests this with "stream": true
+    // `ApiClient::responses` always requests this with "stream": true
     // internally (see its doc comment) and reassembles the result, so
     // nothing needs setting here.
 
@@ -312,7 +322,7 @@ pub struct CreateResponseInput {
 }
 
 pub async fn create_response(
-    client: &LmStudioClient,
+    client: &ApiClient,
     input: CreateResponseInput,
 ) -> ToolResult<ResponseData> {
     let mut body = Map::new();
@@ -358,7 +368,7 @@ pub struct StartConversationInput {
 }
 
 pub async fn start_conversation(
-    client: &LmStudioClient,
+    client: &ApiClient,
     personas: &PersonaCache,
     input: StartConversationInput,
 ) -> ToolResult<ResponseData> {
@@ -409,7 +419,7 @@ pub struct ContinueConversationInput {
 }
 
 pub async fn continue_conversation(
-    client: &LmStudioClient,
+    client: &ApiClient,
     personas: &PersonaCache,
     input: ContinueConversationInput,
 ) -> ToolResult<ResponseData> {

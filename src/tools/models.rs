@@ -1,7 +1,7 @@
 //! Model library and model-management tools: list_models, list_loaded_models,
 //! get_current_model, get_model_info, load_model, unload_model.
 
-use crate::client::{model::ModelEntry, LmStudioClient};
+use crate::client::{model::ModelEntry, ApiClient};
 use crate::types::{ClientError, ErrorCode, ToolResult};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -98,7 +98,7 @@ fn loaded_instances(models: &[ModelEntry]) -> Vec<LoadedModelSummary> {
 /// Shared by `list_loaded_models`, `get_current_model`, and model
 /// auto-detection in the `/v1/responses` tools.
 pub(crate) async fn fetch_loaded(
-    client: &LmStudioClient,
+    client: &ApiClient,
 ) -> Result<Vec<LoadedModelSummary>, ClientError> {
     let resp = client.list_models().await?;
     Ok(loaded_instances(&resp.models))
@@ -132,7 +132,7 @@ impl std::fmt::Display for AutoDetectError {
         match self {
             AutoDetectError::NoneLoaded => write!(
                 f,
-                "No model is currently loaded in LM Studio. Load one first, or pass `model` explicitly."
+                "No model is currently loaded (or, for a provider without model loading, none is marked as such). Pass `model` explicitly."
             ),
             AutoDetectError::Ambiguous(n) => write!(
                 f,
@@ -148,7 +148,7 @@ impl std::fmt::Display for AutoDetectError {
 /// differ when the model was loaded with a custom `identifier` via
 /// `load_model`, and the OpenAI-compatible endpoints route by identifier).
 /// Shared by the responses and subagent tools, which both need this.
-pub(crate) async fn auto_detect_model(client: &LmStudioClient) -> Result<String, AutoDetectError> {
+pub(crate) async fn auto_detect_model(client: &ApiClient) -> Result<String, AutoDetectError> {
     let models = fetch_loaded(client)
         .await
         .map_err(AutoDetectError::Client)?;
@@ -175,7 +175,7 @@ fn tool_err<T>(prefix: &str, e: ClientError) -> ToolResult<T> {
 // list_models
 // ---------------------------------------------------------------------------
 
-pub async fn list_models(client: &LmStudioClient) -> ToolResult<Vec<ModelSummary>> {
+pub async fn list_models(client: &ApiClient) -> ToolResult<Vec<ModelSummary>> {
     match client.list_models().await {
         Ok(resp) => {
             let models: Vec<ModelSummary> = resp.models.iter().map(ModelSummary::from).collect();
@@ -192,7 +192,16 @@ pub async fn list_models(client: &LmStudioClient) -> ToolResult<Vec<ModelSummary
 // list_loaded_models
 // ---------------------------------------------------------------------------
 
-pub async fn list_loaded_models(client: &LmStudioClient) -> ToolResult<Vec<LoadedModelSummary>> {
+pub async fn list_loaded_models(client: &ApiClient) -> ToolResult<Vec<LoadedModelSummary>> {
+    if !client.provider().supports_model_management() {
+        return ToolResult::ok(
+            format!(
+                "{} has no model loading concept — every model from list_models is directly usable without loading",
+                client.provider()
+            ),
+            Vec::new(),
+        );
+    }
     match fetch_loaded(client).await {
         Ok(models) => ToolResult::ok(format!("Found {} loaded model(s)", models.len()), models),
         Err(e) => tool_err("Failed to list loaded models", e),
@@ -203,10 +212,19 @@ pub async fn list_loaded_models(client: &LmStudioClient) -> ToolResult<Vec<Loade
 // get_current_model
 // ---------------------------------------------------------------------------
 
-pub async fn get_current_model(client: &LmStudioClient) -> ToolResult<Vec<LoadedModelSummary>> {
+pub async fn get_current_model(client: &ApiClient) -> ToolResult<Vec<LoadedModelSummary>> {
+    if !client.provider().supports_model_management() {
+        return ToolResult::ok(
+            format!(
+                "{} has no model loading concept — pass `model` explicitly to whichever tool needs one",
+                client.provider()
+            ),
+            Vec::new(),
+        );
+    }
     match fetch_loaded(client).await {
         Ok(models) if models.is_empty() => {
-            ToolResult::ok("No model is currently loaded in LM Studio", models)
+            ToolResult::ok(format!("No model is currently loaded in {}", client.provider()), models)
         }
         Ok(models) if models.len() == 1 => {
             let name = models[0].display_name.clone().unwrap_or_else(|| models[0].model_key.clone());
@@ -234,9 +252,16 @@ pub struct GetModelInfoInput {
 }
 
 pub async fn get_model_info(
-    client: &LmStudioClient,
+    client: &ApiClient,
     input: GetModelInfoInput,
 ) -> ToolResult<LoadedModelSummary> {
+    if !client.provider().supports_model_management() {
+        return ToolResult::err(
+            format!("{} has no model loading concept", client.provider()),
+            ErrorCode::InvalidInput,
+            "this provider does not support get_model_info",
+        );
+    }
     match fetch_loaded(client).await {
         Ok(models) => match models
             .into_iter()
@@ -280,10 +305,17 @@ pub struct LoadedModelData {
     pub context_length: Option<u64>,
 }
 
-pub async fn load_model(
-    client: &LmStudioClient,
-    input: LoadModelInput,
-) -> ToolResult<LoadedModelData> {
+pub async fn load_model(client: &ApiClient, input: LoadModelInput) -> ToolResult<LoadedModelData> {
+    if !client.provider().supports_model_management() {
+        return ToolResult::err(
+            format!(
+                "{} has no model loading concept — every model is directly usable without loading",
+                client.provider()
+            ),
+            ErrorCode::InvalidInput,
+            "this provider does not support load_model",
+        );
+    }
     let mut body = Map::new();
     body.insert("model".into(), Value::String(input.model.clone()));
     if let Some(v) = input.context_length {
@@ -333,7 +365,14 @@ pub struct UnloadModelInput {
     pub identifier: String,
 }
 
-pub async fn unload_model(client: &LmStudioClient, input: UnloadModelInput) -> ToolResult<()> {
+pub async fn unload_model(client: &ApiClient, input: UnloadModelInput) -> ToolResult<()> {
+    if !client.provider().supports_model_management() {
+        return ToolResult::err(
+            format!("{} has no model loading concept", client.provider()),
+            ErrorCode::InvalidInput,
+            "this provider does not support unload_model",
+        );
+    }
     match client.unload_model(&input.identifier).await {
         Ok(_) => ToolResult::ok_empty(format!(
             "Model '{}' unloaded successfully",
