@@ -81,9 +81,11 @@ impl Provider {
     }
 
     /// Whether this provider has a `/v1/responses`-style stateful
-    /// endpoint. Gates `create_response` specifically — `start_conversation`
-    /// / `continue_conversation` don't depend on this, since they manage
-    /// history themselves on top of `chat_completion` for every provider.
+    /// endpoint with `previous_response_id` chaining. Gates
+    /// `create_response`/`start_conversation`/`continue_conversation`.
+    /// (Ollama added a non-stateful `/v1/responses` in v0.13.3, but without
+    /// `previous_response_id` support it can't back these conversation
+    /// tools, so it's still excluded here.)
     pub fn supports_responses_api(self) -> bool {
         matches!(self, Provider::LmStudio | Provider::OpenAi)
     }
@@ -91,6 +93,12 @@ impl Provider {
     /// Whether this provider has any embeddings endpoint at all. Anthropic
     /// doesn't offer one.
     pub fn supports_embeddings(self) -> bool {
+        !matches!(self, Provider::Anthropic)
+    }
+
+    /// Whether this provider has a legacy `/v1/completions` (non-chat)
+    /// endpoint. Anthropic has no equivalent at all.
+    pub fn supports_text_completion(self) -> bool {
         !matches!(self, Provider::Anthropic)
     }
 }
@@ -151,5 +159,15 @@ mod tests {
         assert!(Provider::Ollama.supports_embeddings());
         assert!(Provider::OpenAi.supports_embeddings());
         assert!(!Provider::Anthropic.supports_embeddings());
+    }
+
+    #[test]
+    fn anthropic_is_the_only_one_without_text_completion() {
+        // Ollama documents /v1/completions as supported (verified against
+        // its OpenAI-compatibility docs), so it's not excluded here.
+        assert!(Provider::LmStudio.supports_text_completion());
+        assert!(Provider::Ollama.supports_text_completion());
+        assert!(Provider::OpenAi.supports_text_completion());
+        assert!(!Provider::Anthropic.supports_text_completion());
     }
 }

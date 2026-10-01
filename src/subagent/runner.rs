@@ -47,7 +47,7 @@ pub struct SubagentReport {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
-    #[error("LM Studio request failed: {0}")]
+    #[error("request failed: {0}")]
     Client(#[from] crate::types::ClientError),
     #[error("working directory \"{path}\" doesn't exist or isn't accessible: {source}")]
     WorkingDirectory {

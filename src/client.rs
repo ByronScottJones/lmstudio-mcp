@@ -348,15 +348,15 @@ impl ApiClient {
         let tags_url = format!("{}/tags", self.native_url());
         let tags: OllamaList = self.get_json(&tags_url, DEFAULT_TIMEOUT).await?;
 
-        // Best-effort: if `/api/ps` fails for some reason, still return the
-        // library listing rather than failing the whole call — we just
-        // won't know which of them are currently loaded.
+        // `/api/ps` (which of these is currently loaded) is propagated as a
+        // real failure rather than swallowed into "nothing is loaded" — a
+        // caller using this to auto-detect the current model (or to decide
+        // whether a model needs loading before use) must not silently
+        // mistake "couldn't check" for "none loaded".
         let ps_url = format!("{}/ps", self.native_url());
-        let loaded_names: std::collections::HashSet<String> = self
-            .get_json::<OllamaList>(&ps_url, DEFAULT_TIMEOUT)
-            .await
-            .map(|ps| ps.models.into_iter().map(|m| m.name).collect())
-            .unwrap_or_default();
+        let ps: OllamaList = self.get_json(&ps_url, DEFAULT_TIMEOUT).await?;
+        let loaded_names: std::collections::HashSet<String> =
+            ps.models.into_iter().map(|m| m.name).collect();
 
         let models = tags
             .models
@@ -394,6 +394,12 @@ impl ApiClient {
         Ok(model::ModelsListResponse { models })
     }
 
+    /// Anthropic's `/v1/models` is cursor-paginated (default/max page size
+    /// 20, `has_more` + `last_id` to continue) — this follows `after_id`
+    /// until exhausted so every available model is returned, not just the
+    /// first page. OpenAI's `/v1/models` returns everything in one
+    /// unpaginated response; it simply never sets `has_more`, so the same
+    /// loop runs its body exactly once there.
     async fn list_models_v1(&self) -> Result<model::ModelsListResponse, ClientError> {
         #[derive(Debug, Default, serde::Deserialize)]
         struct V1ModelEntry {
@@ -405,12 +411,35 @@ impl ApiClient {
         struct V1ModelsList {
             #[serde(default)]
             data: Vec<V1ModelEntry>,
+            #[serde(default)]
+            has_more: bool,
+            #[serde(default)]
+            last_id: Option<String>,
         }
 
-        let url = format!("{}/models", self.v1_url());
-        let resp: V1ModelsList = self.get_json(&url, DEFAULT_TIMEOUT).await?;
-        let models = resp
-            .data
+        let mut entries = Vec::new();
+        let mut after_id: Option<String> = None;
+        loop {
+            let url = match &after_id {
+                Some(id) => format!("{}/models?after_id={id}", self.v1_url()),
+                None => format!("{}/models", self.v1_url()),
+            };
+            let resp: V1ModelsList = self.get_json(&url, DEFAULT_TIMEOUT).await?;
+            let has_more = resp.has_more;
+            let last_id = resp.last_id;
+            entries.extend(resp.data);
+            if !has_more {
+                break;
+            }
+            match last_id {
+                Some(id) => after_id = Some(id),
+                // Malformed/unexpected response: has_more without a cursor
+                // to continue from. Stop rather than loop forever.
+                None => break,
+            }
+        }
+
+        let models = entries
             .into_iter()
             .map(|m| model::ModelEntry {
                 key: m.id.clone(),
@@ -440,6 +469,17 @@ impl ApiClient {
     /// Ollama has no explicit "load" call — sending an empty-prompt,
     /// non-streaming generate request loads the model into memory and
     /// returns once it's ready, without generating anything.
+    ///
+    /// `body`'s `context_length`/`eval_batch_size` (LM Studio's field
+    /// names, as built by `tools::models::load_model`) are translated into
+    /// Ollama's `options.num_ctx`/`options.num_batch`. `flash_attention`
+    /// has no per-request Ollama equivalent — it's a global server setting
+    /// (`OLLAMA_FLASH_ATTENTION`), not something a single `/api/generate`
+    /// call can turn on — so a request for it is reported back, not
+    /// silently dropped. `keep_alive` is pinned to "keep loaded
+    /// indefinitely" rather than Ollama's default ~5-minute idle expiry,
+    /// since `load_model`/`unload_model` is this tool's own explicit
+    /// lifecycle control.
     async fn load_model_ollama(
         &self,
         body: Value,
@@ -449,8 +489,26 @@ impl ApiClient {
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
+
+        let mut options = serde_json::Map::new();
+        if let Some(v) = body.get("context_length").and_then(|v| v.as_u64()) {
+            options.insert("num_ctx".to_string(), Value::from(v));
+        }
+        if let Some(v) = body.get("eval_batch_size").and_then(|v| v.as_u64()) {
+            options.insert("num_batch".to_string(), Value::from(v));
+        }
+        let flash_attention_requested = body.get("flash_attention").and_then(|v| v.as_bool());
+
         let url = format!("{}/generate", self.native_url());
-        let req = serde_json::json!({ "model": model_name, "prompt": "", "stream": false });
+        let mut req = serde_json::json!({
+            "model": model_name,
+            "prompt": "",
+            "stream": false,
+            "keep_alive": -1,
+        });
+        if !options.is_empty() {
+            req["options"] = Value::Object(options);
+        }
 
         #[derive(Debug, Default, serde::Deserialize)]
         struct OllamaGenerateResp {
@@ -463,13 +521,21 @@ impl ApiClient {
             .post_json(&url, &req, crate::types::LOAD_MODEL_TIMEOUT)
             .await?;
 
+        let mut status = if resp.done {
+            "loaded".to_string()
+        } else {
+            "unknown".to_string()
+        };
+        if flash_attention_requested.is_some() {
+            status.push_str(
+                " (note: flash_attention is a global Ollama server setting, not a per-request \
+                 option — it was not applied by this call)",
+            );
+        }
+
         Ok(model::LoadModelResponse {
             instance_id: Some(model_name),
-            status: Some(if resp.done {
-                "loaded".to_string()
-            } else {
-                "unknown".to_string()
-            }),
+            status: Some(status),
             // Ollama reports this in nanoseconds.
             load_time_seconds: resp.total_duration.map(|ns| ns as f64 / 1e9),
             ..Default::default()

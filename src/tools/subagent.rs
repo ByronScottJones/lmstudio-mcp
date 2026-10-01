@@ -26,8 +26,9 @@ pub struct RunSubagentInput {
     /// the highest-risk command patterns). Grant only what the task needs.
     #[serde(default)]
     pub capability: Option<Capability>,
-    /// Which loaded model to use as the subagent. Auto-detected if exactly
-    /// one model is currently loaded in LM Studio.
+    /// Which model to use as the subagent. Auto-detected if exactly one
+    /// model is currently loaded (LM Studio/Ollama); required for providers
+    /// with no loaded-model concept (OpenAI/Anthropic).
     #[serde(default)]
     pub model: Option<String>,
     /// Override the subagent's default system prompt/persona.

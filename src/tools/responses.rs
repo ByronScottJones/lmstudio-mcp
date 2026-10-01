@@ -197,7 +197,7 @@ fn failure_detail(data: &Value, status: Option<&str>) -> Option<String> {
     Some(
         data.get("error")
             .and_then(|e| e.get("message").and_then(|m| m.as_str()).or(e.as_str()))
-            .unwrap_or("LM Studio reported this response as failed, with no further detail")
+            .unwrap_or("the provider reported this response as failed, with no further detail")
             .to_string(),
     )
 }
@@ -261,7 +261,7 @@ async fn send_responses_request(
             // LM Studio-side failure as a successful empty response.
             if let Some(detail) = failure_detail(&data, status) {
                 return ToolResult::err(
-                    format!("Request to LM Studio failed: {detail}"),
+                    format!("Request failed: {detail}"),
                     ErrorCode::Unknown,
                     detail,
                 );
@@ -287,11 +287,7 @@ async fn send_responses_request(
                 },
             )
         }
-        Err(e) => ToolResult::err(
-            format!("Request to LM Studio failed: {e}"),
-            e.code(),
-            e.to_string(),
-        ),
+        Err(e) => ToolResult::err(format!("Request failed: {e}"), e.code(), e.to_string()),
     }
 }
 

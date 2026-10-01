@@ -76,16 +76,20 @@ impl<T> ToolResult<T> {
     }
 }
 
-/// Errors that can occur while talking to the LM Studio HTTP API.
+/// Errors that can occur while talking to the configured LLM provider's
+/// HTTP API. Deliberately provider-neutral (no provider name baked into
+/// these messages) since one `ApiClient` can be backed by any of them —
+/// callers that want to name the active provider in a user-facing message
+/// do so themselves (see `tools::health_check`), using `ApiClient::provider`.
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("request timed out after {0:?}")]
     Timeout(Duration),
-    #[error("could not connect to LM Studio: {0}")]
+    #[error("could not connect: {0}")]
     Connect(reqwest::Error),
-    #[error("LM Studio returned HTTP {status}: {body}")]
+    #[error("the server returned HTTP {status}: {body}")]
     Status { status: u16, body: String },
-    #[error("failed to parse LM Studio's response as JSON: {0}")]
+    #[error("failed to parse the server's response as JSON: {0}")]
     Decode(serde_json::Error),
     #[error("request error: {0}")]
     Request(reqwest::Error),
