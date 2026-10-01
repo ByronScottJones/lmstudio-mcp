@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 /// This server's own repo — the default target for `feedback_submit` /
 /// `feedback_check_duplicates` when the caller doesn't pass `repo`.
-const DEFAULT_FEEDBACK_REPO: &str = "ByronScottJones/lmstudio-mcp";
+const DEFAULT_FEEDBACK_REPO: &str = "ByronScottJones/lmstudio-rs-mcp";
 
 #[derive(Clone)]
 pub struct LmStudioServer {
@@ -255,7 +255,7 @@ impl LmStudioServer {
 }
 
 #[tool_handler(
-    name = "lmstudio-mcp",
+    name = "lmstudio-rs-mcp",
     version = "0.1.0",
     instructions = "Bridge to an LLM provider — LM Studio or Ollama (local), or OpenAI/Anthropic (cloud, require an API key) — selected via LLM_PROVIDER: inference (chat, text completion, embeddings, stateful conversations where supported), model management on local providers (list, load, unload), delegating work to a model as a sandboxed subagent (run_subagent), and filing feedback about this server itself as GitHub issues (feedback_*). Run health_check first to confirm the configured provider is reachable."
 )]

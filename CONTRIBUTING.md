@@ -25,7 +25,7 @@ on macOS, Windows, and Linux.
 
 ## Reporting feedback about this server
 
-If you're using `lmstudio-mcp` as an MCP server and hit a bug or have an
+If you're using `lmstudio-rs-mcp` as an MCP server and hit a bug or have an
 idea, the `feedback_create` / `feedback_submit` tools can draft and file it
 as a GitHub issue here directly — see the README's "Feedback" section.
 Opening an issue by hand works just as well, of course.

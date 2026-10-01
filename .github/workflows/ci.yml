@@ -51,8 +51,8 @@ jobs:
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: lmstudio-mcp-${{ matrix.target }}
+          name: lmstudio-rs-mcp-${{ matrix.target }}
           path: |
-            target/${{ matrix.target }}/release/lmstudio-mcp
-            target/${{ matrix.target }}/release/lmstudio-mcp.exe
+            target/${{ matrix.target }}/release/lmstudio-rs-mcp
+            target/${{ matrix.target }}/release/lmstudio-rs-mcp.exe
           if-no-files-found: ignore

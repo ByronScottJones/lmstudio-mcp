@@ -74,7 +74,7 @@ pub async fn fetch_all_issues(
         let mut req = client
             .get(&url)
             .header("Accept", "application/vnd.github+json")
-            .header("User-Agent", "lmstudio-mcp")
+            .header("User-Agent", "lmstudio-rs-mcp")
             .query(&[
                 ("state", "all"),
                 ("per_page", "100"),

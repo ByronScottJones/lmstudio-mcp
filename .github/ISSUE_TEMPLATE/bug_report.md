@@ -17,7 +17,7 @@ What you expected instead.
 
 **Environment**
 - OS: (macOS / Windows / Linux, version)
-- `lmstudio-mcp` version or commit:
+- `lmstudio-rs-mcp` version or commit:
 - LM Studio version:
 - MCP client (Claude Code, Claude Desktop, other):
 
