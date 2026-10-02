@@ -108,20 +108,20 @@ commit; the desktop app version is read from the app bundle on macOS only.
 | `command` | Runs |
 |-----------|------|
 | `server_start` / `server_stop` / `server_status` | `lms server start` / `stop` / `status` |
-| `runtime_ls` / `runtime_select` / `runtime_remove` / `runtime_update` / `runtime_get` / `runtime_survey` | `lms runtime ...` |
+| `runtime_ls` / `runtime_select` / `runtime_update` / `runtime_get` / `runtime_survey` | `lms runtime ...` |
 | `link_status` / `link_enable` / `link_disable` / `link_set_device_name` / `link_set_preferred_device` | `lms link ...` |
 | `get` / `import` / `clone` | `lms get -y` / `import -y` / `clone` |
 | `whoami` / `logout` | `lms whoami` / `logout` |
 
 Model listing, loading and unloading are not here — use `list_models`,
-`load_model` and the rest. `chat`, `log stream`, `dev` and `push` are
-intentionally excluded (interactive, unbounded, or publishing). The CLI is
+`load_model` and the rest. `runtime remove` is excluded as destructive, and `chat`, `log stream`,
+`dev` and `push` are excluded too (interactive, unbounded, or publishing). The CLI is
 spawned directly (no shell), with stdin closed so it can't wait on a prompt,
 a timeout (`timeout_seconds`, default 120, max 3600 — raise it for
 downloads), and output capped at 64 KiB per stream.
 
 Commands that would otherwise open an interactive picker or fail
-(`runtime_select`, `runtime_get`, `runtime_remove`, `link_set_device_name`,
+(`runtime_select`, `runtime_get`, `link_set_device_name`,
 `link_set_preferred_device`, `get`, `import`, `clone`) require at least one
 entry in `args` and are rejected up front without it — e.g.
 `runtime_select` with `["--latest"]` or an alias from `runtime_ls`, and

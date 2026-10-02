@@ -32,7 +32,7 @@ static PLIST_VERSION_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// The `lms` subcommands this server will run on a caller's behalf.
 ///
 /// Deliberately limited to what the LM Studio REST API can't already do:
-/// `ls`/`ps`/`load`/`unload` are covered by `list_models`,
+/// `runtime remove` is deliberately omitted as destructive. `ls`/`ps`/`load`/`unload` are covered by `list_models`,
 /// `list_loaded_models`, `load_model` and `unload_model`, and `chat`,
 /// `log stream`, `dev` and `push` are interactive, unbounded, or publish
 /// outward, so they're not offered.
@@ -49,8 +49,6 @@ pub enum LmsCommand {
     RuntimeLs,
     /// `lms runtime select <alias>` or `--latest` — select an installed engine.
     RuntimeSelect,
-    /// `lms runtime remove <engine>` — remove an installed engine.
-    RuntimeRemove,
     /// `lms runtime update` — update selected runtime extensions (`--all` for every installed one).
     RuntimeUpdate,
     /// `lms runtime get <name>` — download a runtime extension (a name is required: without one the CLI opens an interactive picker).
@@ -88,7 +86,6 @@ impl LmsCommand {
             Self::ServerStatus => &["server", "status", "--json"],
             Self::RuntimeLs => &["runtime", "ls"],
             Self::RuntimeSelect => &["runtime", "select"],
-            Self::RuntimeRemove => &["runtime", "remove"],
             Self::RuntimeUpdate => &["runtime", "update"],
             Self::RuntimeGet => &["runtime", "get"],
             Self::RuntimeSurvey => &["runtime", "survey"],
@@ -123,7 +120,6 @@ impl LmsCommand {
     pub fn min_args(self) -> usize {
         match self {
             Self::RuntimeSelect
-            | Self::RuntimeRemove
             | Self::RuntimeGet
             | Self::LinkSetDeviceName
             | Self::LinkSetPreferredDevice
@@ -365,7 +361,6 @@ mod tests {
         assert!(!LmsCommand::RuntimeLs.is_mutating());
         assert!(!LmsCommand::Whoami.is_mutating());
         assert!(LmsCommand::ServerStop.is_mutating());
-        assert!(LmsCommand::RuntimeRemove.is_mutating());
         assert!(LmsCommand::Logout.is_mutating());
     }
 
@@ -378,6 +373,8 @@ mod tests {
         // Anything outside the allowlist must not deserialize.
         assert!(serde_json::from_value::<LmsCommand>(serde_json::json!("chat")).is_err());
         assert!(serde_json::from_value::<LmsCommand>(serde_json::json!("push")).is_err());
+        // Deliberately unsupported: removing a runtime is destructive.
+        assert!(serde_json::from_value::<LmsCommand>(serde_json::json!("runtime_remove")).is_err());
     }
 
     #[test]

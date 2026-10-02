@@ -59,7 +59,7 @@ impl LmStudioServer {
     }
 
     #[tool(
-        description = "Run an `lms` CLI command for LM Studio features the REST API lacks: server start/stop/status, runtime engine management (ls/select/remove/update/get/survey), LM Link (status/enable/disable/set-device-name/set-preferred-device), model download (`get`), `import`, Hub `clone`, and login state (`whoami`/`logout`). Model list/load/unload have their own tools. Runs without a shell and without stdin, so commands can't prompt: those that would (runtime_select, runtime_get, runtime_remove, link_set_device_name, link_set_preferred_device (takes a device identifier), get, import, clone) require an argument in `args`, e.g. runtime_select with [\"--latest\"] or an engine alias from runtime_ls, runtime_update with [\"--all\"] to update every installed extension rather than only the selected ones. `get` and `import` pass -y"
+        description = "Run an `lms` CLI command for LM Studio features the REST API lacks: server start/stop/status, runtime engine management (ls/select/update/get/survey), LM Link (status/enable/disable/set-device-name/set-preferred-device), model download (`get`), `import`, Hub `clone`, and login state (`whoami`/`logout`). Model list/load/unload have their own tools. Runs without a shell and without stdin, so commands can't prompt: those that would (runtime_select, runtime_get, link_set_device_name, link_set_preferred_device (takes a device identifier), get, import, clone) require an argument in `args`, e.g. runtime_select with [\"--latest\"] or an engine alias from runtime_ls, runtime_update with [\"--all\"] to update every installed extension rather than only the selected ones. `get` and `import` pass -y"
     )]
     async fn lms_cli(
         &self,
