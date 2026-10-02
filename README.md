@@ -125,7 +125,8 @@ Commands that would otherwise open an interactive picker or fail
 `link_set_preferred_device`, `get`, `import`, `clone`) require at least one
 entry in `args` and are rejected up front without it — e.g.
 `runtime_select` with `["--latest"]` or an alias from `runtime_ls`, and
-`runtime_update` with `["--all"]` to update every installed extension, not
+`link_set_preferred_device` with a device identifier (e.g.
+`["d18d35beec0f1736dfc5164d8d97b7e4"]`), and `runtime_update` with `["--all"]` to update every installed extension, not
 just the selected ones.
 
 The CLI is found via `LMS_PATH` (explicit override), then `PATH`, then

@@ -65,7 +65,7 @@ pub enum LmsCommand {
     LinkDisable,
     /// `lms link set-device-name <name>` — rename this LM Link device.
     LinkSetDeviceName,
-    /// `lms link set-preferred-device <device>` — set the preferred LM Link device (without an argument the CLI opens an interactive picker).
+    /// `lms link set-preferred-device <device-id>` — set the preferred LM Link device by its identifier (without an argument the CLI opens an interactive picker).
     LinkSetPreferredDevice,
     /// `lms get <name>` — search for and download a model or Hub artifact (always passes `-y`).
     Get,
