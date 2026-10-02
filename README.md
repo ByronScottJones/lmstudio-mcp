@@ -404,4 +404,4 @@ I am a software engineer with nearly 50 years of experience. I now use AI tools 
 If you do not like that I use AI, tough.
 In the words of Bender:
 
-![Bender](assets/futurama-bender-bite-my-shiny-metal-ass.gif "Bender - Bite My Shiny Metal Ass")
+![Bender](assets/Byron-Bender-Bite-thumb.jpg "Bender - Bite My Shiny Metal Ass")
