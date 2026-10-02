@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::LazyLock;
 use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 /// Per-stream cap on captured CLI output, so a chatty command (e.g. a model
@@ -194,7 +195,7 @@ pub(crate) fn locate_lms_in(
         let p = PathBuf::from(p);
         // An explicit override that doesn't exist is a misconfiguration;
         // don't silently fall through to a different binary.
-        return p.is_file().then_some(p);
+        return is_executable(&p).then_some(p);
     }
     let on_path = path_var.into_iter().flat_map(|v| {
         std::env::split_paths(&v)
@@ -202,7 +203,51 @@ pub(crate) fn locate_lms_in(
             .collect::<Vec<_>>()
     });
     let in_home = home.map(|h| h.join(".lmstudio").join("bin").join(exe_name()));
-    on_path.chain(in_home).find(|p| p.is_file())
+    on_path.chain(in_home).find(|p| is_executable(p))
+}
+
+/// A regular file the current user could run. On Unix that means an execute
+/// bit is set, so a stale non-executable `lms` earlier on `PATH` is skipped
+/// the way a shell would skip it; Windows has no such bit.
+fn is_executable(p: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(p) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// Quote one argument for display so argument boundaries stay visible:
+/// bare if it only has shell-safe characters, otherwise single-quoted.
+fn quote_arg(arg: &str) -> String {
+    let safe = !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c));
+    if safe {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
+}
+
+/// Human-readable `lms ...` command line with unambiguous argument
+/// boundaries. For display and logs only — it is never executed.
+pub fn display_command_line(args: &[String]) -> String {
+    std::iter::once("lms".to_string())
+        .chain(args.iter().map(|a| quote_arg(a)))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Candidate locations of the LM Studio desktop app on this platform.
@@ -272,25 +317,39 @@ impl CliOutput {
     }
 }
 
-/// Keep at most `MAX_OUTPUT_BYTES` of `s`, cutting on a char boundary.
-fn cap(s: String) -> (String, bool) {
-    if s.len() <= MAX_OUTPUT_BYTES {
-        return (s, false);
+/// Read `reader` to EOF, keeping at most `MAX_OUTPUT_BYTES` and discarding
+/// the rest. Draining to EOF (rather than stopping at the cap) matters: a
+/// child blocked on a full pipe would otherwise never exit. Memory use is
+/// bounded by the cap regardless of how much the child writes.
+async fn read_capped<R: AsyncRead + Unpin>(mut reader: R) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut kept = Vec::new();
+    let mut truncated = false;
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = reader.read(&mut chunk).await?;
+        if n == 0 {
+            return Ok((kept, truncated));
+        }
+        let room = MAX_OUTPUT_BYTES.saturating_sub(kept.len());
+        if n > room {
+            truncated = true;
+        }
+        kept.extend_from_slice(&chunk[..n.min(room)]);
     }
-    let mut end = MAX_OUTPUT_BYTES;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    (s[..end].to_string(), true)
+}
+
+fn clean(bytes: &[u8]) -> String {
+    strip_ansi(&String::from_utf8_lossy(bytes))
 }
 
 /// Run `program` with `args`, capturing ANSI-stripped output.
 ///
 /// Stdin is closed so a command that wants to prompt fails immediately
 /// instead of hanging until the timeout, and the child is killed if the
-/// timeout elapses (or this future is dropped).
+/// timeout elapses (or this future is dropped). Output is read into
+/// bounded buffers as it arrives, not buffered whole.
 pub async fn run(program: &Path, args: &[String], timeout: Duration) -> std::io::Result<CliOutput> {
-    let child = Command::new(program)
+    let mut child = Command::new(program)
         .args(args)
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
@@ -298,16 +357,27 @@ pub async fn run(program: &Path, args: &[String], timeout: Duration) -> std::io:
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
+    let (stdout_pipe, stderr_pipe) = child
+        .stdout
+        .take()
+        .zip(child.stderr.take())
+        .ok_or_else(|| std::io::Error::other("child stdio was not piped"))?;
 
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+    let work = async {
+        let (status, out, err) = tokio::join!(
+            child.wait(),
+            read_capped(stdout_pipe),
+            read_capped(stderr_pipe)
+        );
+        Ok::<_, std::io::Error>((status?, out?, err?))
+    };
+    match tokio::time::timeout(timeout, work).await {
         Ok(result) => {
-            let out = result?;
-            let (stdout, t1) = cap(strip_ansi(&String::from_utf8_lossy(&out.stdout)));
-            let (stderr, t2) = cap(strip_ansi(&String::from_utf8_lossy(&out.stderr)));
+            let (status, (stdout, t1), (stderr, t2)) = result?;
             Ok(CliOutput {
-                exit_code: out.status.code(),
-                stdout,
-                stderr,
+                exit_code: status.code(),
+                stdout: clean(&stdout),
+                stderr: clean(&stderr),
                 timed_out: false,
                 truncated: t1 || t2,
             })
@@ -322,6 +392,16 @@ pub async fn run(program: &Path, args: &[String], timeout: Duration) -> std::io:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Write an empty file and, on Unix, mark it executable.
+    fn write_exe(path: &Path) {
+        std::fs::write(path, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
 
     fn scratch_dir(tag: &str) -> PathBuf {
         let d =
@@ -424,7 +504,7 @@ mod tests {
     fn locate_prefers_override_and_does_not_fall_through() {
         let dir = scratch_dir("locate-override");
         let bin = dir.join(exe_name());
-        std::fs::write(&bin, "").unwrap();
+        write_exe(&bin);
 
         let found = locate_lms_in(Some(bin.clone().into_os_string()), None, None);
         assert_eq!(found, Some(bin));
@@ -442,7 +522,7 @@ mod tests {
     #[test]
     fn locate_searches_path_then_lmstudio_home() {
         let on_path = scratch_dir("locate-path");
-        std::fs::write(on_path.join(exe_name()), "").unwrap();
+        write_exe(&on_path.join(exe_name()));
         let path_var = std::env::join_paths([&on_path]).unwrap();
         assert_eq!(
             locate_lms_in(None, Some(path_var), None),
@@ -452,7 +532,7 @@ mod tests {
         let home = scratch_dir("locate-home");
         let bin_dir = home.join(".lmstudio").join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
-        std::fs::write(bin_dir.join(exe_name()), "").unwrap();
+        write_exe(&bin_dir.join(exe_name()));
         assert_eq!(
             locate_lms_in(None, None, Some(home.clone())),
             Some(bin_dir.join(exe_name()))
@@ -463,14 +543,73 @@ mod tests {
         std::fs::remove_dir_all(home).ok();
     }
 
+    #[cfg(unix)]
     #[test]
-    fn cap_truncates_on_a_char_boundary() {
-        let s = "é".repeat(MAX_OUTPUT_BYTES); // 2 bytes each
-        let (out, truncated) = cap(s);
+    fn locate_skips_non_executable_files_on_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let stale = scratch_dir("locate-stale");
+        let good = scratch_dir("locate-good");
+        let stale_bin = stale.join(exe_name());
+        std::fs::write(&stale_bin, "").unwrap();
+        std::fs::set_permissions(&stale_bin, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_exe(&good.join(exe_name()));
+
+        let path_var = std::env::join_paths([&stale, &good]).unwrap();
+        assert_eq!(
+            locate_lms_in(None, Some(path_var), None),
+            Some(good.join(exe_name()))
+        );
+        // An override pointing at a non-executable file is rejected too.
+        assert_eq!(
+            locate_lms_in(Some(stale_bin.into_os_string()), None, None),
+            None
+        );
+        std::fs::remove_dir_all(stale).ok();
+        std::fs::remove_dir_all(good).ok();
+    }
+
+    #[test]
+    fn display_command_line_keeps_argument_boundaries() {
+        let args = vec![
+            "import".to_string(),
+            "/Users/me/My Models/a b.gguf".to_string(),
+            "it's".to_string(),
+            String::new(),
+            "--latest".to_string(),
+        ];
+        assert_eq!(
+            display_command_line(&args),
+            "lms import '/Users/me/My Models/a b.gguf' 'it'\\''s' '' --latest"
+        );
+        assert_eq!(display_command_line(&[]), "lms");
+    }
+
+    #[tokio::test]
+    async fn read_capped_bounds_memory_but_drains_to_eof() {
+        let data = vec![b'x'; MAX_OUTPUT_BYTES * 3 + 5];
+        let (kept, truncated) = read_capped(&data[..]).await.unwrap();
+        assert_eq!(kept.len(), MAX_OUTPUT_BYTES);
         assert!(truncated);
-        assert!(out.len() <= MAX_OUTPUT_BYTES);
-        let (small, truncated) = cap("short".to_string());
-        assert_eq!((small.as_str(), truncated), ("short", false));
+
+        let (kept, truncated) = read_capped(&b"short"[..]).await.unwrap();
+        assert_eq!((kept.as_slice(), truncated), (&b"short"[..], false));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_truncates_large_output_without_blocking_the_child() {
+        // ~1 MiB, far past the cap and the pipe buffer: the child only
+        // exits if we keep draining after the cap is reached.
+        let out = run(
+            Path::new("/bin/sh"),
+            &["-c".into(), "head -c 1048576 /dev/zero | tr '\\0' x".into()],
+            Duration::from_secs(20),
+        )
+        .await
+        .unwrap();
+        assert!(out.succeeded(), "{out:?}");
+        assert!(out.truncated);
+        assert_eq!(out.stdout.len(), MAX_OUTPUT_BYTES);
     }
 
     #[cfg(unix)]

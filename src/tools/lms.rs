@@ -204,8 +204,11 @@ pub struct LmsCliInput {
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct LmsCliData {
-    /// The command line that was run, for the record.
+    /// Display form of the command that was run, with quoting that keeps
+    /// argument boundaries visible. Not meant to be pasted into a shell.
     pub command_line: String,
+    /// The exact arguments passed to `lms`, one element per argument.
+    pub argv: Vec<String>,
     #[serde(flatten)]
     pub output: CliOutput,
 }
@@ -229,7 +232,7 @@ pub async fn lms_cli(input: LmsCliInput) -> ToolResult<LmsCliData> {
             .unwrap_or(DEFAULT_CLI_TIMEOUT_SECS)
             .clamp(1, MAX_CLI_TIMEOUT_SECS),
     );
-    let command_line = format!("lms {}", argv.join(" "));
+    let command_line = lms::display_command_line(&argv);
     tracing::info!(%command_line, mutating = input.command.is_mutating(), "Running lms CLI command");
 
     match lms::run(&program, &argv, timeout).await {
@@ -237,6 +240,7 @@ pub async fn lms_cli(input: LmsCliInput) -> ToolResult<LmsCliData> {
             format!("`{command_line}` succeeded"),
             LmsCliData {
                 command_line,
+                argv,
                 output,
             },
         ),
