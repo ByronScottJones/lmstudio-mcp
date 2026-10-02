@@ -3,7 +3,7 @@
 
 use crate::client::ApiClient;
 use crate::feedback::store::FeedbackStore;
-use crate::tools::{chat, embeddings, feedback, health_check, models, responses, subagent};
+use crate::tools::{chat, embeddings, feedback, health_check, lms, models, responses, subagent};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{tool, tool_handler, tool_router, Peer, RoleServer, ServerHandler};
@@ -49,6 +49,23 @@ impl LmStudioServer {
     )]
     async fn health_check(&self) -> Json<crate::types::ToolResult<health_check::HealthCheckData>> {
         Json(health_check::health_check(&self.client).await)
+    }
+
+    #[tool(
+        description = "Check the LM Studio environment: whether LM Studio is installed (and its app version where readable), whether the `lms` CLI is available (and its build commit), and whether the LM Studio REST API is reachable. Each is reported independently, so this works even when LM Studio isn't running or isn't installed"
+    )]
+    async fn lmstudio_status(&self) -> Json<crate::types::ToolResult<lms::LmStudioStatusData>> {
+        Json(lms::lmstudio_status(&self.client).await)
+    }
+
+    #[tool(
+        description = "Run an `lms` CLI command for LM Studio features the REST API lacks: server start/stop/status, runtime engine management (ls/select/remove/update/get/survey), LM Link (status/enable/disable/set-device-name/set-preferred-device), model download (`get`), `import`, Hub `clone`, and login state (`whoami`/`logout`). Model list/load/unload have their own tools. Runs without a shell and without stdin, so commands can't prompt; `get` and `import` pass -y. Pass extra flags/arguments in `args`"
+    )]
+    async fn lms_cli(
+        &self,
+        Parameters(input): Parameters<lms::LmsCliInput>,
+    ) -> Json<crate::types::ToolResult<lms::LmsCliData>> {
+        Json(lms::lms_cli(input).await)
     }
 
     #[tool(

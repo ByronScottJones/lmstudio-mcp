@@ -39,6 +39,8 @@ below need to know which provider is actually active.
 | Tool | Works on | Description |
 |------|----------|-------------|
 | `health_check` | all | Verify the configured provider is reachable |
+| `lmstudio_status` | LM Studio | Check whether LM Studio is installed (and its version), the `lms` CLI is available (and its build commit), and the REST API is reachable — each reported independently |
+| `lms_cli` | LM Studio | Run an `lms` CLI command the REST API lacks: server start/stop/status, runtime engines, LM Link, `get` (download), `import`, `clone`, `whoami`/`logout` (see below) |
 | `list_models` | all | List models available from the configured provider — the local library for LM Studio/Ollama, or every model the API key can use for OpenAI/Anthropic |
 | `list_loaded_models` | LM Studio, Ollama | List currently loaded model instances |
 | `get_current_model` | LM Studio, Ollama | Identify the loaded model |
@@ -93,6 +95,33 @@ reporting that as a bare failure, affected tools return it as a *success*
 with the reasoning trace included in `reasoning_content` and a message
 explaining what happened — so you can see why and retry with a larger
 budget instead of getting an opaque error.
+
+## LM Studio environment: `lmstudio_status` and `lms_cli`
+
+`lmstudio_status` probes installation, the `lms` CLI, and the API
+separately, so it still gives a useful answer when LM Studio is missing or
+not running. The CLI has no semantic version, so its version is the build
+commit; the desktop app version is read from the app bundle on macOS only.
+
+`lms_cli` takes a `command` from a fixed allowlist plus optional `args`:
+
+| `command` | Runs |
+|-----------|------|
+| `server_start` / `server_stop` / `server_status` | `lms server start` / `stop` / `status` |
+| `runtime_ls` / `runtime_select` / `runtime_remove` / `runtime_update` / `runtime_get` / `runtime_survey` | `lms runtime ...` |
+| `link_status` / `link_enable` / `link_disable` / `link_set_device_name` / `link_set_preferred_device` | `lms link ...` |
+| `get` / `import` / `clone` | `lms get -y` / `import -y` / `clone` |
+| `whoami` / `logout` | `lms whoami` / `logout` |
+
+Model listing, loading and unloading are not here — use `list_models`,
+`load_model` and the rest. `chat`, `log stream`, `dev` and `push` are
+intentionally excluded (interactive, unbounded, or publishing). The CLI is
+spawned directly (no shell), with stdin closed so it can't wait on a prompt,
+a timeout (`timeout_seconds`, default 120, max 3600 — raise it for
+downloads), and output capped at 64 KiB per stream.
+
+The CLI is found via `LMS_PATH` (explicit override), then `PATH`, then
+`~/.lmstudio/bin`.
 
 ## Subagents: `run_subagent`
 
@@ -193,6 +222,7 @@ Read from the environment at connect time:
 | `LLM_PROVIDER` | `lmstudio` | One of `lmstudio`, `ollama`, `openai`, `anthropic` (`claude` also accepted). Unknown values fall back to `lmstudio` with a warning. |
 | `LLM_BASE_URL` | provider default | Full `scheme://host:port` override. Provider defaults: `http://127.0.0.1:1234` (lmstudio), `http://127.0.0.1:11434` (ollama), `https://api.openai.com` (openai), `https://api.anthropic.com` (anthropic). |
 | `LLM_API_KEY` | _(none)_ | API key / bearer token. **Required** for `openai` and `anthropic` (the server refuses to start without one); optional for `lmstudio`/`ollama`, if you've turned on local API auth. |
+| `LMS_PATH` | _(auto-detected)_ | Full path to the `lms` binary, for `lmstudio_status`/`lms_cli`. Otherwise searched on `PATH`, then `~/.lmstudio/bin`. |
 | `GITHUB_TOKEN` | _(none)_ | Used by `feedback_check_duplicates`/`feedback_submit` for a private repo, if no `token` argument is passed and `gh` isn't already authenticated. |
 
 Anthropic authenticates with `x-api-key` + a required `anthropic-version`
@@ -303,6 +333,7 @@ src/
 ├── providers.rs   # The Provider enum: capability matrix per backend
 ├── config.rs      # Environment-variable configuration (provider, base URL, API key)
 ├── types.rs       # Shared ToolResult<T> envelope, ErrorCode, ClientError
+├── lms.rs         # Locating/running the `lms` CLI, install detection, command allowlist
 ├── sse.rs         # Server-Sent Events reader (idle-timeout streaming, see above)
 ├── feedback/
 │   ├── store.rs   # Local JSON CRUD for feedback entries
@@ -313,6 +344,7 @@ src/
 │   └── runner.rs  # The agentic tool-calling loop
 └── tools/
     ├── health_check.rs
+    ├── lms.rs          # lmstudio_status, lms_cli
     ├── models.rs       # list_models, list_loaded_models, get_current_model,
     │                   # get_model_info, load_model, unload_model
     ├── chat.rs         # chat_completion, text_completion
