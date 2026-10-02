@@ -17,6 +17,8 @@ pub enum ErrorCode {
     ConnectionFailed,
     Unauthorized,
     InvalidInput,
+    /// The `lms` CLI isn't installed or couldn't be located.
+    CliNotFound,
     LoadFailed,
     UnloadFailed,
     Timeout,

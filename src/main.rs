@@ -5,6 +5,7 @@
 mod client;
 mod config;
 mod feedback;
+mod lms;
 mod providers;
 mod server;
 mod sse;
