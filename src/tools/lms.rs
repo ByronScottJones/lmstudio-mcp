@@ -211,7 +211,7 @@ pub struct LmsCliData {
 }
 
 pub async fn lms_cli(input: LmsCliInput) -> ToolResult<LmsCliData> {
-    if let Err(e) = lms::validate_extra_args(&input.args) {
+    if let Err(e) = lms::validate_extra_args(input.command, &input.args) {
         return ToolResult::err("Invalid arguments", ErrorCode::InvalidInput, e);
     }
     let Some(program) = lms::locate_lms() else {

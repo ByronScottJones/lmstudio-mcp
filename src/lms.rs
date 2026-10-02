@@ -47,13 +47,13 @@ pub enum LmsCommand {
     ServerStatus,
     /// `lms runtime ls` — list installed inference engines.
     RuntimeLs,
-    /// `lms runtime select <engine>` — select an installed engine.
+    /// `lms runtime select <alias>` or `--latest` — select an installed engine.
     RuntimeSelect,
     /// `lms runtime remove <engine>` — remove an installed engine.
     RuntimeRemove,
-    /// `lms runtime update` — update installed runtime extensions.
+    /// `lms runtime update` — update selected runtime extensions (`--all` for every installed one).
     RuntimeUpdate,
-    /// `lms runtime get [name]` — download or list runtime extensions.
+    /// `lms runtime get <name>` — download a runtime extension (a name is required: without one the CLI opens an interactive picker).
     RuntimeGet,
     /// `lms runtime survey` — survey the GPU/CPU/RAM available to the selected engines.
     RuntimeSurvey,
@@ -65,7 +65,7 @@ pub enum LmsCommand {
     LinkDisable,
     /// `lms link set-device-name <name>` — rename this LM Link device.
     LinkSetDeviceName,
-    /// `lms link set-preferred-device <device>` — set the preferred LM Link device.
+    /// `lms link set-preferred-device <device>` — set the preferred LM Link device (without an argument the CLI opens an interactive picker).
     LinkSetPreferredDevice,
     /// `lms get <name>` — search for and download a model or Hub artifact (always passes `-y`).
     Get,
@@ -117,6 +117,23 @@ impl LmsCommand {
         )
     }
 
+    /// How many caller arguments the command needs to run without
+    /// prompting. Commands that would otherwise open an interactive picker
+    /// or error out are rejected up front with a clear message instead.
+    pub fn min_args(self) -> usize {
+        match self {
+            Self::RuntimeSelect
+            | Self::RuntimeRemove
+            | Self::RuntimeGet
+            | Self::LinkSetDeviceName
+            | Self::LinkSetPreferredDevice
+            | Self::Get
+            | Self::Import
+            | Self::Clone => 1,
+            _ => 0,
+        }
+    }
+
     /// Full argv (after the program name): the fixed arguments followed by
     /// the caller's extra arguments.
     pub fn argv(self, extra: &[String]) -> Vec<String> {
@@ -130,8 +147,15 @@ impl LmsCommand {
 
 /// Reject extra arguments that can't be passed through to a process
 /// unchanged, with a message that says what to fix.
-pub fn validate_extra_args(extra: &[String]) -> Result<(), String> {
+pub fn validate_extra_args(command: LmsCommand, extra: &[String]) -> Result<(), String> {
     const MAX_ARGS: usize = 32;
+    if extra.len() < command.min_args() {
+        return Err(format!(
+            "`{}` needs at least {} argument(s) in `args`; without one the CLI would prompt interactively or fail",
+            command.base_args().join(" "),
+            command.min_args()
+        ));
+    }
     if extra.len() > MAX_ARGS {
         return Err(format!(
             "too many arguments ({}); at most {MAX_ARGS} are allowed",
@@ -358,10 +382,29 @@ mod tests {
 
     #[test]
     fn validate_extra_args_rejects_nul_and_excess() {
-        assert!(validate_extra_args(&["ok".into()]).is_ok());
-        assert!(validate_extra_args(&["bad\0arg".into()]).is_err());
+        let c = LmsCommand::Whoami;
+        assert!(validate_extra_args(c, &["ok".into()]).is_ok());
+        assert!(validate_extra_args(c, &["bad\0arg".into()]).is_err());
         let many = vec!["x".to_string(); 33];
-        assert!(validate_extra_args(&many).is_err());
+        assert!(validate_extra_args(c, &many).is_err());
+    }
+
+    #[test]
+    fn commands_that_would_prompt_require_an_argument() {
+        // Seen live: bare `runtime select` errors, and bare `runtime get` /
+        // `link set-preferred-device` open interactive pickers.
+        for c in [
+            LmsCommand::RuntimeSelect,
+            LmsCommand::RuntimeGet,
+            LmsCommand::LinkSetDeviceName,
+            LmsCommand::LinkSetPreferredDevice,
+        ] {
+            assert!(validate_extra_args(c, &[]).is_err(), "{c:?}");
+            assert!(validate_extra_args(c, &["x".into()]).is_ok(), "{c:?}");
+        }
+        assert!(validate_extra_args(LmsCommand::RuntimeLs, &[]).is_ok());
+        let msg = validate_extra_args(LmsCommand::RuntimeSelect, &[]).unwrap_err();
+        assert!(msg.contains("runtime select"), "{msg}");
     }
 
     #[test]

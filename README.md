@@ -120,6 +120,14 @@ spawned directly (no shell), with stdin closed so it can't wait on a prompt,
 a timeout (`timeout_seconds`, default 120, max 3600 — raise it for
 downloads), and output capped at 64 KiB per stream.
 
+Commands that would otherwise open an interactive picker or fail
+(`runtime_select`, `runtime_get`, `runtime_remove`, `link_set_device_name`,
+`link_set_preferred_device`, `get`, `import`, `clone`) require at least one
+entry in `args` and are rejected up front without it — e.g.
+`runtime_select` with `["--latest"]` or an alias from `runtime_ls`, and
+`runtime_update` with `["--all"]` to update every installed extension, not
+just the selected ones.
+
 The CLI is found via `LMS_PATH` (explicit override), then `PATH`, then
 `~/.lmstudio/bin`.
 
